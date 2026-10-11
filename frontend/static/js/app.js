@@ -36,6 +36,10 @@ const historyEmpty = document.getElementById(
     "history-empty"
 );
 
+const clearHistoryButton = document.getElementById(
+    "clear-history"
+);
+
 const DEFAULT_PLACEHOLDER = (
     messageBox.placeholder
 );
@@ -212,6 +216,97 @@ function addList(
 }
 
 
+function addEvidenceDetails(
+    parent,
+    data
+) {
+    const safety = data.safety || {};
+
+    const hasPpe = (
+        safety.ppe_required
+        && safety.ppe_required.length
+    );
+
+    const hasSources = (
+        data.sources
+        && data.sources.length
+    );
+
+    const hasEscalationReason = (
+        Boolean(data.escalation_reason)
+    );
+
+    const hasRunId = (
+        Boolean(data.run_id)
+    );
+
+    if (
+        !hasPpe
+        && !hasSources
+        && !hasEscalationReason
+        && !hasRunId
+    ) {
+        return;
+    }
+
+    const details = el(
+        "details",
+        "evidence-details"
+    );
+
+    const summary = el(
+        "summary",
+        "",
+        "Evidence & details"
+    );
+
+    const content = el(
+        "div",
+        "evidence-content"
+    );
+
+    addList(
+        content,
+        "Required PPE",
+        safety.ppe_required
+    );
+
+    addList(
+        content,
+        "Sources",
+        data.sources
+    );
+
+    if (data.escalation_reason) {
+        content.appendChild(
+            el(
+                "div",
+                "meta",
+                (
+                    "Escalation reason: "
+                    + data.escalation_reason
+                )
+            )
+        );
+    }
+
+    if (data.run_id) {
+        content.appendChild(
+            el(
+                "div",
+                "meta",
+                "Run ID: " + data.run_id
+            )
+        );
+    }
+
+    details.appendChild(summary);
+    details.appendChild(content);
+
+    parent.appendChild(details);
+}
+
+
 function hideWelcome() {
     welcome.style.display = "none";
 }
@@ -266,8 +361,17 @@ function renderHistory() {
             : ""
     );
 
+    clearHistoryButton.disabled = (
+        sorted.length === 0
+    );
+
     sorted.forEach(
         function (chat) {
+            const row = el(
+                "div",
+                "chat-history-row"
+            );
+
             const button = el(
                 "button",
                 (
@@ -294,9 +398,87 @@ function renderHistory() {
                 }
             );
 
-            historyBox.appendChild(button);
+            const deleteButton = el(
+                "button",
+                "delete-chat-button",
+                "×"
+            );
+
+            deleteButton.type = "button";
+
+            deleteButton.title = (
+                "Delete conversation"
+            );
+
+            deleteButton.setAttribute(
+                "aria-label",
+                (
+                    "Delete conversation: "
+                    + chat.title
+                )
+            );
+
+            deleteButton.addEventListener(
+                "click",
+                function (event) {
+                    event.stopPropagation();
+
+                    deleteConversation(
+                        chat.id
+                    );
+                }
+            );
+
+            row.appendChild(button);
+            row.appendChild(deleteButton);
+
+            historyBox.appendChild(row);
         }
     );
+}
+
+
+function deleteConversation(chatId) {
+    const chat = conversations.find(
+        function (item) {
+            return item.id === chatId;
+        }
+    );
+
+    if (!chat) {
+        return;
+    }
+
+    const confirmed = window.confirm(
+        (
+            'Delete "'
+            + chat.title
+            + '"?'
+        )
+    );
+
+    if (!confirmed) {
+        return;
+    }
+
+    const deletingActive = (
+        chat.id === activeChatId
+    );
+
+    conversations = conversations.filter(
+        function (item) {
+            return item.id !== chatId;
+        }
+    );
+
+    saveConversations();
+
+    if (deletingActive) {
+        startNewConversation();
+        return;
+    }
+
+    renderHistory();
 }
 
 
@@ -432,6 +614,67 @@ function removeLoadingMessage() {
 }
 
 
+function addResponseIndicators(
+    card,
+    data,
+    status
+) {
+    const indicators = el(
+        "div",
+        "response-indicators"
+    );
+
+    indicators.appendChild(
+        el(
+            "span",
+            "badge",
+            status
+        )
+    );
+
+    const explanation = (
+        data.explanation || {}
+    );
+
+    const confidenceLevel = (
+        typeof explanation.confidence_level
+        === "string"
+    )
+        ? explanation.confidence_level
+            .trim()
+            .toLowerCase()
+        : "";
+
+    const allowedLevels = [
+        "high",
+        "medium",
+        "low"
+    ];
+
+    if (
+        allowedLevels.includes(
+            confidenceLevel
+        )
+    ) {
+        indicators.appendChild(
+            el(
+                "span",
+                (
+                    "confidence-badge "
+                    + confidenceLevel
+                ),
+                (
+                    confidenceLevel
+                    + " confidence"
+                )
+            )
+        );
+    }
+
+    card.appendChild(indicators);
+}
+
+
 // Model-generated content continues to use textContent.
 // Never render model output with innerHTML.
 function appendAssistantMessage(
@@ -472,12 +715,10 @@ function appendAssistantMessage(
         "assistant-card " + status
     );
 
-    card.appendChild(
-        el(
-            "span",
-            "badge",
-            status
-        )
+    addResponseIndicators(
+        card,
+        data,
+        status
     );
 
     card.appendChild(
@@ -508,40 +749,10 @@ function appendAssistantMessage(
         );
     }
 
-    addList(
+    addEvidenceDetails(
         card,
-        "Required PPE",
-        safety.ppe_required
+        data
     );
-
-    addList(
-        card,
-        "Sources",
-        data.sources
-    );
-
-    if (data.escalation_reason) {
-        card.appendChild(
-            el(
-                "div",
-                "meta",
-                (
-                    "Escalation reason: "
-                    + data.escalation_reason
-                )
-            )
-        );
-    }
-
-    if (data.run_id) {
-        card.appendChild(
-            el(
-                "div",
-                "meta",
-                "Run ID: " + data.run_id
-            )
-        );
-    }
 
     bubble.appendChild(card);
 
@@ -760,6 +971,50 @@ messageBox.addEventListener(
 newChatButton.addEventListener(
     "click",
     startNewConversation
+);
+
+
+clearHistoryButton.addEventListener(
+    "click",
+    function () {
+        if (!conversations.length) {
+            return;
+        }
+
+        const confirmed = window.confirm(
+            (
+                "Clear all chat history from "
+                + "this browser?"
+            )
+        );
+
+        if (!confirmed) {
+            return;
+        }
+
+        conversations = [];
+
+        localStorage.removeItem(
+            STORAGE_KEY
+        );
+
+        activeChatId = null;
+        conversationId = null;
+
+        setClarifying(false);
+
+        clearTimeline();
+
+        showWelcome();
+
+        messageBox.value = "";
+
+        resizeComposer();
+
+        renderHistory();
+
+        messageBox.focus();
+    }
 );
 
 
