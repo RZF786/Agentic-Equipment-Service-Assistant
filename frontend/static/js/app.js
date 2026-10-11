@@ -1,0 +1,933 @@
+const STORAGE_KEY = "aem-assistant-conversations-v1";
+
+const conversation = document.getElementById(
+    "conversation"
+);
+
+const conversationInner = document.getElementById(
+    "conversation-inner"
+);
+
+const welcome = document.getElementById(
+    "welcome"
+);
+
+const select = document.getElementById(
+    "equipment"
+);
+
+const sendButton = document.getElementById(
+    "send"
+);
+
+const messageBox = document.getElementById(
+    "message"
+);
+
+const newChatButton = document.getElementById(
+    "new-chat"
+);
+
+const historyBox = document.getElementById(
+    "chat-history"
+);
+
+const historyEmpty = document.getElementById(
+    "history-empty"
+);
+
+const DEFAULT_PLACEHOLDER = (
+    messageBox.placeholder
+);
+
+
+let conversations = loadConversations();
+
+let activeChatId = null;
+
+let conversationId = null;
+
+
+function createId() {
+    return (
+        window.crypto
+        && window.crypto.randomUUID
+    )
+        ? window.crypto.randomUUID()
+        : (
+            Date.now().toString(36)
+            + "-"
+            + Math.random()
+                .toString(36)
+                .slice(2)
+        );
+}
+
+
+function loadConversations() {
+    try {
+        const raw = localStorage.getItem(
+            STORAGE_KEY
+        );
+
+        if (!raw) {
+            return [];
+        }
+
+        const parsed = JSON.parse(raw);
+
+        return Array.isArray(parsed)
+            ? parsed
+            : [];
+    } catch (error) {
+        return [];
+    }
+}
+
+
+function saveConversations() {
+    try {
+        localStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify(conversations)
+        );
+    } catch (error) {
+        console.warn(
+            "Could not save chat history.",
+            error
+        );
+    }
+}
+
+
+function currentConversation() {
+    return conversations.find(
+        function (item) {
+            return item.id === activeChatId;
+        }
+    );
+}
+
+
+function createConversation() {
+    const chat = {
+        id: createId(),
+        conversation_id: createId(),
+        title: "New equipment conversation",
+        equipment_model: select.value || "",
+        created_at: Date.now(),
+        updated_at: Date.now(),
+        messages: []
+    };
+
+    conversations.unshift(chat);
+
+    activeChatId = chat.id;
+    conversationId = chat.conversation_id;
+
+    saveConversations();
+
+    renderHistory();
+
+    return chat;
+}
+
+
+function ensureConversation() {
+    let chat = currentConversation();
+
+    if (!chat) {
+        chat = createConversation();
+    }
+
+    return chat;
+}
+
+
+function setClarifying(on) {
+    messageBox.placeholder = on
+        ? "Answer the clarification question above..."
+        : DEFAULT_PLACEHOLDER;
+}
+
+
+function el(
+    tag,
+    className,
+    text
+) {
+    const node = document.createElement(tag);
+
+    if (className) {
+        node.className = className;
+    }
+
+    if (text !== undefined) {
+        node.textContent = text;
+    }
+
+    return node;
+}
+
+
+function addList(
+    parent,
+    title,
+    items
+) {
+    if (!items || !items.length) {
+        return;
+    }
+
+    const box = el(
+        "div",
+        "meta"
+    );
+
+    box.appendChild(
+        el(
+            "strong",
+            "",
+            title
+        )
+    );
+
+    const list = el("ul");
+
+    items.forEach(
+        function (item) {
+            list.appendChild(
+                el(
+                    "li",
+                    "",
+                    item
+                )
+            );
+        }
+    );
+
+    box.appendChild(list);
+
+    parent.appendChild(box);
+}
+
+
+function hideWelcome() {
+    welcome.style.display = "none";
+}
+
+
+function showWelcome() {
+    welcome.style.display = "";
+}
+
+
+function scrollToBottom() {
+    window.requestAnimationFrame(
+        function () {
+            conversation.scrollTop = (
+                conversation.scrollHeight
+            );
+        }
+    );
+}
+
+
+function makeTitle(text) {
+    const clean = text
+        .replace(/\s+/g, " ")
+        .trim();
+
+    if (!clean) {
+        return "New equipment conversation";
+    }
+
+    return clean.length > 38
+        ? clean.slice(0, 38) + "…"
+        : clean;
+}
+
+
+function renderHistory() {
+    historyBox.replaceChildren();
+
+    const sorted = [...conversations].sort(
+        function (a, b) {
+            return (
+                (b.updated_at || 0)
+                - (a.updated_at || 0)
+            );
+        }
+    );
+
+    historyEmpty.style.display = (
+        sorted.length
+            ? "none"
+            : ""
+    );
+
+    sorted.forEach(
+        function (chat) {
+            const button = el(
+                "button",
+                (
+                    "chat-history-item"
+                    + (
+                        chat.id === activeChatId
+                            ? " active"
+                            : ""
+                    )
+                ),
+                chat.title
+            );
+
+            button.type = "button";
+
+            button.title = chat.title;
+
+            button.addEventListener(
+                "click",
+                function () {
+                    switchConversation(
+                        chat.id
+                    );
+                }
+            );
+
+            historyBox.appendChild(button);
+        }
+    );
+}
+
+
+function clearTimeline() {
+    Array.from(
+        conversationInner.children
+    ).forEach(
+        function (child) {
+            if (child !== welcome) {
+                child.remove();
+            }
+        }
+    );
+}
+
+
+function appendUserMessage(
+    text,
+    shouldScroll = true
+) {
+    hideWelcome();
+
+    const row = el(
+        "div",
+        "message-row user"
+    );
+
+    const message = el(
+        "div",
+        "message"
+    );
+
+    message.appendChild(
+        el(
+            "div",
+            "message-label",
+            "You"
+        )
+    );
+
+    message.appendChild(
+        el(
+            "div",
+            "message-bubble",
+            text
+        )
+    );
+
+    row.appendChild(message);
+
+    conversationInner.appendChild(row);
+
+    if (shouldScroll) {
+        scrollToBottom();
+    }
+}
+
+
+function appendLoadingMessage() {
+    const existing = document.getElementById(
+        "loading-message"
+    );
+
+    if (existing) {
+        existing.remove();
+    }
+
+    const row = el(
+        "div",
+        "message-row assistant"
+    );
+
+    row.id = "loading-message";
+
+    const message = el(
+        "div",
+        "message"
+    );
+
+    message.appendChild(
+        el(
+            "div",
+            "message-label",
+            "Assistant"
+        )
+    );
+
+    const bubble = el(
+        "div",
+        "message-bubble"
+    );
+
+    const loading = el(
+        "div",
+        "loading"
+    );
+
+    loading.appendChild(
+        el(
+            "span",
+            "loading-dot"
+        )
+    );
+
+    loading.appendChild(
+        el(
+            "span",
+            "",
+            "Searching the manual..."
+        )
+    );
+
+    bubble.appendChild(loading);
+
+    message.appendChild(bubble);
+
+    row.appendChild(message);
+
+    conversationInner.appendChild(row);
+
+    scrollToBottom();
+}
+
+
+function removeLoadingMessage() {
+    const loading = document.getElementById(
+        "loading-message"
+    );
+
+    if (loading) {
+        loading.remove();
+    }
+}
+
+
+// Model-generated content continues to use textContent.
+// Never render model output with innerHTML.
+function appendAssistantMessage(
+    data,
+    shouldScroll = true
+) {
+    removeLoadingMessage();
+
+    hideWelcome();
+
+    const status = data.status || "error";
+
+    const row = el(
+        "div",
+        "message-row assistant"
+    );
+
+    const message = el(
+        "div",
+        "message"
+    );
+
+    message.appendChild(
+        el(
+            "div",
+            "message-label",
+            "Assistant"
+        )
+    );
+
+    const bubble = el(
+        "div",
+        "message-bubble"
+    );
+
+    const card = el(
+        "div",
+        "assistant-card " + status
+    );
+
+    card.appendChild(
+        el(
+            "span",
+            "badge",
+            status
+        )
+    );
+
+    card.appendChild(
+        el(
+            "div",
+            "answer",
+            (
+                data.response
+                || data.error
+                || JSON.stringify(
+                    data,
+                    null,
+                    2
+                )
+            )
+        )
+    );
+
+    const safety = data.safety || {};
+
+    if (safety.warning) {
+        card.appendChild(
+            el(
+                "div",
+                "warn",
+                safety.warning
+            )
+        );
+    }
+
+    addList(
+        card,
+        "Required PPE",
+        safety.ppe_required
+    );
+
+    addList(
+        card,
+        "Sources",
+        data.sources
+    );
+
+    if (data.escalation_reason) {
+        card.appendChild(
+            el(
+                "div",
+                "meta",
+                (
+                    "Escalation reason: "
+                    + data.escalation_reason
+                )
+            )
+        );
+    }
+
+    if (data.run_id) {
+        card.appendChild(
+            el(
+                "div",
+                "meta",
+                "Run ID: " + data.run_id
+            )
+        );
+    }
+
+    bubble.appendChild(card);
+
+    message.appendChild(bubble);
+
+    row.appendChild(message);
+
+    conversationInner.appendChild(row);
+
+    if (shouldScroll) {
+        scrollToBottom();
+    }
+}
+
+
+function renderConversation(chat) {
+    clearTimeline();
+
+    setClarifying(false);
+
+    if (!chat || !chat.messages.length) {
+        showWelcome();
+        return;
+    }
+
+    hideWelcome();
+
+    chat.messages.forEach(
+        function (item) {
+            if (item.role === "user") {
+                appendUserMessage(
+                    item.text,
+                    false
+                );
+            }
+
+            if (item.role === "assistant") {
+                appendAssistantMessage(
+                    item.data,
+                    false
+                );
+
+                setClarifying(
+                    item.data.status
+                    === "clarification"
+                );
+            }
+        }
+    );
+
+    scrollToBottom();
+}
+
+
+function switchConversation(chatId) {
+    const chat = conversations.find(
+        function (item) {
+            return item.id === chatId;
+        }
+    );
+
+    if (!chat) {
+        return;
+    }
+
+    activeChatId = chat.id;
+
+    conversationId = chat.conversation_id;
+
+    if (chat.equipment_model) {
+        select.value = chat.equipment_model;
+    }
+
+    renderHistory();
+
+    renderConversation(chat);
+
+    messageBox.value = "";
+
+    resizeComposer();
+
+    messageBox.focus();
+}
+
+
+function startNewConversation() {
+    activeChatId = null;
+
+    conversationId = null;
+
+    setClarifying(false);
+
+    clearTimeline();
+
+    showWelcome();
+
+    messageBox.value = "";
+
+    resizeComposer();
+
+    renderHistory();
+
+    messageBox.focus();
+}
+
+
+function resizeComposer() {
+    messageBox.style.height = "auto";
+
+    messageBox.style.height = (
+        Math.min(
+            messageBox.scrollHeight,
+            150
+        )
+        + "px"
+    );
+}
+
+
+async function loadEquipment() {
+    try {
+        const res = await fetch(
+            "/api/equipment"
+        );
+
+        if (!res.ok) {
+            throw new Error(
+                "Equipment request failed"
+            );
+        }
+
+        const items = await res.json();
+
+        select.replaceChildren(
+            new Option(
+                "Select equipment...",
+                ""
+            )
+        );
+
+        items.forEach(
+            function (item) {
+                select.appendChild(
+                    new Option(
+                        item.label,
+                        item.id
+                    )
+                );
+            }
+        );
+
+        const chat = currentConversation();
+
+        if (
+            chat
+            && chat.equipment_model
+        ) {
+            select.value = (
+                chat.equipment_model
+            );
+        }
+    } catch (error) {
+        select.replaceChildren(
+            new Option(
+                "Could not load equipment",
+                ""
+            )
+        );
+    }
+}
+
+
+select.addEventListener(
+    "change",
+    function () {
+        const chat = currentConversation();
+
+        if (!chat) {
+            return;
+        }
+
+        chat.equipment_model = select.value;
+
+        chat.updated_at = Date.now();
+
+        saveConversations();
+    }
+);
+
+
+messageBox.addEventListener(
+    "input",
+    resizeComposer
+);
+
+
+messageBox.addEventListener(
+    "keydown",
+    function (event) {
+        if (
+            event.key === "Enter"
+            && !event.shiftKey
+        ) {
+            event.preventDefault();
+
+            document
+                .getElementById(
+                    "chat-form"
+                )
+                .requestSubmit();
+        }
+    }
+);
+
+
+newChatButton.addEventListener(
+    "click",
+    startNewConversation
+);
+
+
+document
+    .getElementById("chat-form")
+    .addEventListener(
+        "submit",
+        async function (event) {
+            event.preventDefault();
+
+            const text = (
+                messageBox.value.trim()
+            );
+
+            if (
+                !text
+                || !select.value
+                || sendButton.disabled
+            ) {
+                return;
+            }
+
+            const chat = ensureConversation();
+
+            if (!chat.messages.length) {
+                chat.title = makeTitle(text);
+            }
+
+            chat.equipment_model = select.value;
+
+            chat.updated_at = Date.now();
+
+            chat.messages.push(
+                {
+                    role: "user",
+                    text: text
+                }
+            );
+
+            saveConversations();
+
+            renderHistory();
+
+            appendUserMessage(text);
+
+            messageBox.value = "";
+
+            resizeComposer();
+
+            sendButton.disabled = true;
+
+            appendLoadingMessage();
+
+            try {
+                const res = await fetch(
+                    "/api/ask",
+                    {
+                        method: "POST",
+
+                        headers: {
+                            "Content-Type":
+                                "application/json"
+                        },
+
+                        body: JSON.stringify(
+                            {
+                                message: text,
+
+                                equipment_model:
+                                    select.value
+                                    || null,
+
+                                conversation_id:
+                                    conversationId
+                            }
+                        )
+                    }
+                );
+
+                const data = await res.json();
+
+                if (data.conversation_id) {
+                    conversationId = (
+                        data.conversation_id
+                    );
+
+                    chat.conversation_id = (
+                        data.conversation_id
+                    );
+                }
+
+                chat.messages.push(
+                    {
+                        role: "assistant",
+                        data: data
+                    }
+                );
+
+                chat.updated_at = Date.now();
+
+                saveConversations();
+
+                renderHistory();
+
+                appendAssistantMessage(data);
+
+                setClarifying(
+                    data.status
+                    === "clarification"
+                );
+            } catch (error) {
+                const errorData = {
+                    status: "error",
+
+                    error:
+                        "Error: "
+                        + error.message
+                };
+
+                chat.messages.push(
+                    {
+                        role: "assistant",
+                        data: errorData
+                    }
+                );
+
+                chat.updated_at = Date.now();
+
+                saveConversations();
+
+                appendAssistantMessage(
+                    errorData
+                );
+
+                setClarifying(false);
+            } finally {
+                sendButton.disabled = false;
+
+                messageBox.focus();
+            }
+        }
+    );
+
+
+async function initialize() {
+    renderHistory();
+
+    await loadEquipment();
+
+    if (conversations.length) {
+        const latest = [...conversations].sort(
+            function (a, b) {
+                return (
+                    (b.updated_at || 0)
+                    - (a.updated_at || 0)
+                );
+            }
+        )[0];
+
+        switchConversation(
+            latest.id
+        );
+    } else {
+        startNewConversation();
+    }
+
+    resizeComposer();
+}
+
+
+initialize();

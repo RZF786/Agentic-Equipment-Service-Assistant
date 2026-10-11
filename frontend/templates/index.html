@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>Equipment Service Assistant</title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='css/app.css') }}"
+    >
+</head>
+
+<body>
+
+<div class="app-shell">
+
+    <aside class="sidebar">
+
+        <div class="sidebar-header">
+
+            <div class="brand">
+                <div class="brand-mark">A</div>
+
+                <div>
+                    <div class="brand-name">
+                        AEM Assistant
+                    </div>
+
+                    <div class="brand-subtitle">
+                        Equipment service support
+                    </div>
+                </div>
+            </div>
+
+            <button
+                type="button"
+                id="new-chat"
+                class="new-chat-button"
+            >
+                <span>＋</span>
+                <span>New chat</span>
+            </button>
+
+        </div>
+
+        <div class="sidebar-scroll">
+
+            <div class="sidebar-section-title">
+                Conversations
+            </div>
+
+            <div id="chat-history"></div>
+
+            <div
+                id="history-empty"
+                class="history-placeholder"
+            >
+                No previous conversations yet.
+            </div>
+
+        </div>
+
+        <div class="sidebar-footer">
+            Answers are grounded in the selected
+            AEM equipment documentation.
+        </div>
+
+    </aside>
+
+
+    <main class="workspace">
+
+        <header class="topbar">
+
+            <div class="topbar-copy">
+                <div class="topbar-title">
+                    Equipment Service Assistant
+                </div>
+
+                <div class="topbar-subtitle">
+                    Agentic RAG · Diagnostic · Safety
+                </div>
+            </div>
+
+            <div class="equipment-control">
+
+                <label for="equipment">
+                    Equipment
+                </label>
+
+                <select id="equipment" required>
+                    <option value="">
+                        Loading equipment...
+                    </option>
+                </select>
+
+            </div>
+
+        </header>
+
+
+        <section
+            id="conversation"
+            class="conversation"
+        >
+
+            <div
+                id="conversation-inner"
+                class="conversation-inner"
+            >
+
+                <div
+                    id="welcome"
+                    class="welcome"
+                >
+
+                    <div class="welcome-mark">
+                        A
+                    </div>
+
+                    <h1>
+                        How can I help with the equipment?
+                    </h1>
+
+                    <p>
+                        Select an AEM equipment model and ask
+                        about operation, maintenance,
+                        troubleshooting, documented safety
+                        requirements, or service procedures.
+                    </p>
+
+                </div>
+
+            </div>
+
+        </section>
+
+
+        <footer class="composer-area">
+
+            <form
+                id="chat-form"
+                class="composer"
+            >
+
+                <div class="composer-box">
+
+                    <textarea
+                        id="message"
+                        rows="1"
+                        placeholder="Ask about the selected equipment..."
+                        required
+                    ></textarea>
+
+                    <button
+                        type="submit"
+                        id="send"
+                        class="send-button"
+                        title="Send"
+                        aria-label="Send message"
+                    >
+                        ↑
+                    </button>
+
+                </div>
+
+                <div class="composer-help">
+                    Enter to send · Shift+Enter for a new line
+                </div>
+
+            </form>
+
+        </footer>
+
+    </main>
+
+</div>
+
+
+<script
+    src="{{ url_for('static', filename='js/app.js') }}"
+></script>
+
+</body>
+</html>

@@ -41,7 +41,7 @@ services:
       dockerfile: Dockerfile.frontend
     container_name: aem-frontend
     ports:
-      - "5000:5000"
+      - "5002:5000"
     environment:
       BACKEND_URL: http://backend:8000
       BACKEND_TIMEOUT: ${BACKEND_TIMEOUT:-120}

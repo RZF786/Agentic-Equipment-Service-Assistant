@@ -266,11 +266,11 @@ venv and set \`PYTHONPATH\` there too):
 
 \`\`\`
 
-flask --app frontend.app run --port 5000
+flask --app frontend.app run --port 5002
 
 \`\`\`
 
-**\*\*9. Use it.\*\*** Open http://localhost:5000, choose the equipment
+**\*\*9. Use it.\*\*** Open http://localhost:5002, choose the equipment
 and ask a question. The backend health check is
 http://localhost:8000/health and readiness is
 http://localhost:8000/ready (503 until the agents have loaded). Stop
@@ -365,7 +365,7 @@ reused). The log should then show only \`INFO\` lines.
 \- **\*\*Cannot connect to the Docker daemon:\*\*** start Docker Desktop
 and wait until it says it is running.
 
-\- **\*\*Port 8000 or 5000 already in use:\*\*** stop the other program
+\- **\*\*Port 8000 or 5002 already in use:\*\*** stop the other program
 (for example a local \`uvicorn\` or \`flask\`), or run \`docker compose
 down\`.
 
