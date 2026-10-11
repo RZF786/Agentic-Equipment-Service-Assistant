@@ -28,12 +28,24 @@ class AgenticRAGAgent:
 
         self.retriever = AEMHybridRetriever()
 
-        self.client = OpenAI(
-            api_key=os.getenv("OPENAI_API_KEY")
-        )
+        self.client = None
 
         self.junior_model = "gpt-4o-mini"
         self.senior_model = "gpt-5.4-mini"
+
+    def _get_client(self) -> OpenAI:
+        """
+        Create the OpenAI client only when an LLM call is
+        actually required.
+
+        Retrieval-only use and mocked unit tests therefore do
+        not require external OpenAI credentials at import time.
+        """
+
+        if self.client is None:
+            self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+        return self.client
 
     # ------------------------------------------------------------------
     # Retrieval capability
@@ -80,37 +92,17 @@ class AgenticRAGAgent:
 
         return [
             {
-                "chunk_id":
-                    item.chunk_id,
-
-                "doc_id":
-                    item.doc_id,
-
-                "source_file":
-                    item.source_file,
-
-                "page":
-                    item.page,
-
-                "section_id":
-                    item.section_id,
-
-                "section_title":
-                    item.section_title,
-
-                "revision":
-                    item.revision,
-
-                "equipment_model":
-                    item.equipment_model,
-
-                "text":
-                    item.text,
-
-                "rrf_score":
-                    item.score,
+                "chunk_id": item.chunk_id,
+                "doc_id": item.doc_id,
+                "source_file": item.source_file,
+                "page": item.page,
+                "section_id": item.section_id,
+                "section_title": item.section_title,
+                "revision": item.revision,
+                "equipment_model": item.equipment_model,
+                "text": item.text,
+                "rrf_score": item.score,
             }
-
             for item in results
         ]
 
@@ -124,14 +116,9 @@ class AgenticRAGAgent:
         """
 
         if tool_name == "search_service_documents":
+            query = arguments.get("query")
 
-            query = arguments.get(
-                "query"
-            )
-
-            equipment_model = arguments.get(
-                "equipment_model"
-            )
+            equipment_model = arguments.get("equipment_model")
 
             k = int(
                 arguments.get(
@@ -141,16 +128,10 @@ class AgenticRAGAgent:
             )
 
             if not query:
-                raise ValueError(
-                    "search_service_documents "
-                    "requires query."
-                )
+                raise ValueError("search_service_documents requires query.")
 
             if not equipment_model:
-                raise ValueError(
-                    "search_service_documents "
-                    "requires equipment_model."
-                )
+                raise ValueError("search_service_documents requires equipment_model.")
 
             return self.search_service_documents(
                 query=query,
@@ -158,9 +139,7 @@ class AgenticRAGAgent:
                 k=k,
             )
 
-        raise ValueError(
-            f"Unknown tool: {tool_name}"
-        )
+        raise ValueError(f"Unknown tool: {tool_name}")
 
     def get_tool_definitions(
         self,
@@ -176,39 +155,25 @@ class AgenticRAGAgent:
             {
                 "type": "function",
                 "function": {
-                    "name":
-                        "search_service_documents",
-
+                    "name": "search_service_documents",
                     "description": (
-                        "Search the authoritative AEM "
-                        "service documentation for the "
-                        "selected equipment model."
+                        "Search the authoritative AEM service documentation for the selected equipment model."
                     ),
-
                     "parameters": {
                         "type": "object",
-
                         "properties": {
                             "query": {
                                 "type": "string",
-                                "description": (
-                                    "Concise service-document "
-                                    "search query."
-                                ),
+                                "description": ("Concise service-document search query."),
                             },
-
                             "equipment_model": {
                                 "type": "string",
                                 "enum": [
                                     "thermal_station",
                                     "thermal_retrofit_1kw",
                                 ],
-                                "description": (
-                                    "Equipment model whose "
-                                    "documentation must be searched."
-                                ),
+                                "description": ("Equipment model whose documentation must be searched."),
                             },
-
                             "k": {
                                 "type": "integer",
                                 "minimum": 1,
@@ -216,14 +181,11 @@ class AgenticRAGAgent:
                                 "default": 5,
                             },
                         },
-
                         "required": [
                             "query",
                             "equipment_model",
                         ],
-
-                        "additionalProperties":
-                            False,
+                        "additionalProperties": False,
                     },
                 },
             }
@@ -241,14 +203,9 @@ class AgenticRAGAgent:
         """
 
         if not equipment_model:
-            raise ValueError(
-                "Junior Agent requires equipment_model."
-            )
+            raise ValueError("Junior Agent requires equipment_model.")
 
-        print(
-            "\n[Junior Agent] "
-            "Selecting retrieval tool..."
-        )
+        print("\n[Junior Agent] Selecting retrieval tool...")
 
         messages = [
             {
@@ -279,40 +236,28 @@ class AgenticRAGAgent:
 
         tools = self.get_tool_definitions()
 
-        response = self.client.chat.completions.create(
+        response = self._get_client().chat.completions.create(
             model=self.junior_model,
             messages=messages,
             tools=tools,
-
             # Retrieval is mandatory at this node.
             tool_choice={
                 "type": "function",
-                "function": {
-                    "name":
-                        "search_service_documents"
-                },
+                "function": {"name": "search_service_documents"},
             },
-
             temperature=0,
         )
 
         message = response.choices[0].message
 
         if not message.tool_calls:
-            raise RuntimeError(
-                "Junior Agent did not request the "
-                "required retrieval tool."
-            )
+            raise RuntimeError("Junior Agent did not request the required retrieval tool.")
 
         tool_call = message.tool_calls[0]
 
-        tool_name = (
-            tool_call.function.name
-        )
+        tool_name = tool_call.function.name
 
-        arguments = json.loads(
-            tool_call.function.arguments
-        )
+        arguments = json.loads(tool_call.function.arguments)
 
         # --------------------------------------------------
         # Security / isolation boundary
@@ -321,47 +266,28 @@ class AgenticRAGAgent:
         # Never allow the LLM to switch equipment.
         # --------------------------------------------------
 
-        arguments["equipment_model"] = (
-            equipment_model
-        )
+        arguments["equipment_model"] = equipment_model
 
         arguments["k"] = k
 
-        print(
-            f"Tool requested: {tool_name}"
-        )
+        print(f"Tool requested: {tool_name}")
 
-        print(
-            "Search query selected by Junior Agent: "
-            f"{arguments.get('query')}"
-        )
+        print(f"Search query selected by Junior Agent: {arguments.get('query')}")
 
-        print(
-            "Equipment enforced by application: "
-            f"{equipment_model}"
-        )
+        print(f"Equipment enforced by application: {equipment_model}")
 
         results = self.execute_tool(
             tool_name,
             arguments,
         )
 
-        print(
-            f"Tool executed: {tool_name}"
-        )
+        print(f"Tool executed: {tool_name}")
 
         return {
-            "tool_name":
-                tool_name,
-
-            "search_query":
-                arguments.get("query"),
-
-            "equipment_model":
-                equipment_model,
-
-            "results":
-                results,
+            "tool_name": tool_name,
+            "search_query": arguments.get("query"),
+            "equipment_model": equipment_model,
+            "results": results,
         }
 
     def format_retrieval_context(
@@ -378,7 +304,6 @@ class AgenticRAGAgent:
             results,
             start=1,
         ):
-
             context_parts.append(
                 f"[EVIDENCE {rank}]\n"
                 f"Source: {result['source_file']}\n"
@@ -388,9 +313,7 @@ class AgenticRAGAgent:
                 f"Content:\n{result['text']}\n"
             )
 
-        return "\n".join(
-            context_parts
-        )
+        return "\n".join(context_parts)
 
     def assess_retrieval(
         self,
@@ -404,17 +327,11 @@ class AgenticRAGAgent:
         """
 
         if not results:
-
-            print(
-                "Retrieval assessment: POOR "
-                "(no results)"
-            )
+            print("Retrieval assessment: POOR (no results)")
 
             return False
 
-        context = self.format_retrieval_context(
-            results
-        )
+        context = self.format_retrieval_context(results)
 
         prompt = f"""
 You are a retrieval-quality evaluator for an
@@ -461,7 +378,7 @@ or
 POOR
 """
 
-        response = self.client.chat.completions.create(
+        response = self._get_client().chat.completions.create(
             model=self.junior_model,
             messages=[
                 {
@@ -481,17 +398,9 @@ POOR
             temperature=0,
         )
 
-        assessment = (
-            response.choices[0]
-            .message.content
-            .strip()
-            .upper()
-        )
+        assessment = response.choices[0].message.content.strip().upper()
 
-        print(
-            f"LLM retrieval assessment: "
-            f"{assessment}"
-        )
+        print(f"LLM retrieval assessment: {assessment}")
 
         return assessment == "GOOD"
 
@@ -506,9 +415,7 @@ POOR
         the original engineer intent and equipment identity.
         """
 
-        context = self.format_retrieval_context(
-            results
-        )
+        context = self.format_retrieval_context(results)
 
         prompt = f"""
 You are the Junior Retrieval Agent for an
@@ -544,7 +451,7 @@ Rules:
 5. Return only the new search query.
 """
 
-        response = self.client.chat.completions.create(
+        response = self._get_client().chat.completions.create(
             model=self.junior_model,
             messages=[
                 {
@@ -563,11 +470,7 @@ Rules:
             temperature=0,
         )
 
-        return (
-            response.choices[0]
-            .message.content
-            .strip()
-        )
+        return response.choices[0].message.content.strip()
 
     def senior_review(
         self,
@@ -585,17 +488,9 @@ Rules:
         is justified or whether human escalation is required.
         """
 
-        first_context = (
-            self.format_retrieval_context(
-                first_results
-            )
-        )
+        first_context = self.format_retrieval_context(first_results)
 
-        second_context = (
-            self.format_retrieval_context(
-                second_results
-            )
-        )
+        second_context = self.format_retrieval_context(second_results)
 
         prompt = f"""
             You are the Senior Retrieval Agent for an
@@ -649,7 +544,7 @@ Rules:
             QUERY: <new query if RETRY, otherwise NONE>
             """
 
-        response = self.client.chat.completions.create(
+        response = self._get_client().chat.completions.create(
             model=self.senior_model,
             messages=[
                 {
@@ -669,30 +564,17 @@ Rules:
             ],
         )
 
-        review = (
-            response.choices[0]
-            .message.content
-            .strip()
-        )
+        review = response.choices[0].message.content.strip()
 
         decision = "ESCALATE"
-        reason = (
-            "Senior Agent did not return "
-            "a valid decision."
-        )
+        reason = "Senior Agent did not return a valid decision."
         query = None
 
         for line in review.splitlines():
-
             line = line.strip()
 
             if line.startswith("DECISION:"):
-
-                value = (
-                    line.split(":", 1)[1]
-                    .strip()
-                    .upper()
-                )
+                value = line.split(":", 1)[1].strip().upper()
 
                 if value in {
                     "RETRY",
@@ -701,52 +583,27 @@ Rules:
                     decision = value
 
             elif line.startswith("REASON:"):
-
-                reason = (
-                    line.split(":", 1)[1]
-                    .strip()
-                )
+                reason = line.split(":", 1)[1].strip()
 
             elif line.startswith("QUERY:"):
+                value = line.split(":", 1)[1].strip()
 
-                value = (
-                    line.split(":", 1)[1]
-                    .strip()
-                )
-
-                if (
-                    value
-                    and value.upper()
-                    != "NONE"
-                ):
+                if value and value.upper() != "NONE":
                     query = value
 
         # RETRY without a usable query is unsafe /
         # operationally meaningless.
-        if (
-            decision == "RETRY"
-            and not query
-        ):
+        if decision == "RETRY" and not query:
             decision = "ESCALATE"
 
-            reason = (
-                "Senior Agent requested RETRY "
-                "without providing a valid query."
-            )
+            reason = "Senior Agent requested RETRY without providing a valid query."
 
-        print(
-            f"Senior decision: {decision}"
-        )
+        print(f"Senior decision: {decision}")
 
-        print(
-            f"Senior reason: {reason}"
-        )
+        print(f"Senior reason: {reason}")
 
         if query:
-
-            print(
-                f"Senior query: {query}"
-            )
+            print(f"Senior query: {query}")
 
         return {
             "decision": decision,
@@ -770,23 +627,15 @@ Rules:
         print("REAL AEM AGENTIC RETRIEVAL")
         print("=" * 80)
 
-        print(
-            f"\nEngineer question:\n"
-            f"{question}"
-        )
+        print(f"\nEngineer question:\n{question}")
 
-        print(
-            f"\nEquipment model:\n"
-            f"{equipment_model}"
-        )
+        print(f"\nEquipment model:\n{equipment_model}")
 
         # --------------------------------------------------
         # Attempt 1
         # --------------------------------------------------
 
-        print(
-            "\n[Step 1] Initial Junior retrieval..."
-        )
+        print("\n[Step 1] Initial Junior retrieval...")
 
         first = self.junior_search(
             question=question,
@@ -800,9 +649,7 @@ Rules:
         # Assessment 1
         # --------------------------------------------------
 
-        print(
-            "\n[Step 2] Assess initial evidence..."
-        )
+        print("\n[Step 2] Assess initial evidence...")
 
         first_good = self.assess_retrieval(
             question=question,
@@ -811,57 +658,29 @@ Rules:
         )
 
         if first_good:
-
-            print(
-                "Retrieval assessment: GOOD"
-            )
+            print("Retrieval assessment: GOOD")
 
             return {
-                "original_query":
-                    question,
-
-                "final_query":
-                    first["search_query"],
-
-                "equipment_model":
-                    equipment_model,
-
-                "retrieval_attempts":
-                    1,
-
-                "retrieval_status":
-                    "GOOD",
-
-                "tool_name":
-                    first["tool_name"],
-
-                "senior_used":
-                    False,
-
-                "senior_decision":
-                    None,
-
-                "senior_reason":
-                    None,
-
-                "escalation_required":
-                    False,
-
-                "results":
-                    first_results,
+                "original_query": question,
+                "final_query": first["search_query"],
+                "equipment_model": equipment_model,
+                "retrieval_attempts": 1,
+                "retrieval_status": "GOOD",
+                "tool_name": first["tool_name"],
+                "senior_used": False,
+                "senior_decision": None,
+                "senior_reason": None,
+                "escalation_required": False,
+                "results": first_results,
             }
 
-        print(
-            "Retrieval assessment: POOR"
-        )
+        print("Retrieval assessment: POOR")
 
         # --------------------------------------------------
         # Reformulation
         # --------------------------------------------------
 
-        print(
-            "\n[Step 3] Reformulating search..."
-        )
+        print("\n[Step 3] Reformulating search...")
 
         new_query = self.reformulate_query(
             question=question,
@@ -869,45 +688,30 @@ Rules:
             results=first_results,
         )
 
-        print(
-            f"Reformulated query:\n"
-            f"{new_query}"
-        )
+        print(f"Reformulated query:\n{new_query}")
 
         # --------------------------------------------------
         # Attempt 2
         # --------------------------------------------------
 
-        print(
-            "\n[Step 4] Second tool-based retrieval..."
-        )
+        print("\n[Step 4] Second tool-based retrieval...")
 
         second_results = self.execute_tool(
             "search_service_documents",
             {
-                "query":
-                    new_query,
-
-                "equipment_model":
-                    equipment_model,
-
-                "k":
-                    k,
+                "query": new_query,
+                "equipment_model": equipment_model,
+                "k": k,
             },
         )
 
-        print(
-            "Tool executed: "
-            "search_service_documents"
-        )
+        print("Tool executed: search_service_documents")
 
         # --------------------------------------------------
         # Assessment 2
         # --------------------------------------------------
 
-        print(
-            "\n[Step 5] Reassess evidence..."
-        )
+        print("\n[Step 5] Reassess evidence...")
 
         second_good = self.assess_retrieval(
             question=question,
@@ -916,152 +720,72 @@ Rules:
         )
 
         if second_good:
-
-            print(
-                "Second retrieval assessment: GOOD"
-            )
+            print("Second retrieval assessment: GOOD")
 
             return {
-                "original_query":
-                    question,
-
-                "final_query":
-                    new_query,
-
-                "equipment_model":
-                    equipment_model,
-
-                "retrieval_attempts":
-                    2,
-
-                "retrieval_status":
-                    "GOOD",
-
-                "tool_name":
-                    "search_service_documents",
-
-                "senior_used":
-                    False,
-
-                "senior_decision":
-                    None,
-
-                "senior_reason":
-                    None,
-
-                "escalation_required":
-                    False,
-
-                "results":
-                    second_results,
+                "original_query": question,
+                "final_query": new_query,
+                "equipment_model": equipment_model,
+                "retrieval_attempts": 2,
+                "retrieval_status": "GOOD",
+                "tool_name": "search_service_documents",
+                "senior_used": False,
+                "senior_decision": None,
+                "senior_reason": None,
+                "escalation_required": False,
+                "results": second_results,
             }
 
-        print(
-            "Second retrieval assessment: POOR"
-        )
+        print("Second retrieval assessment: POOR")
 
         # --------------------------------------------------
         # Senior review
         # --------------------------------------------------
 
-        print(
-            "\n[Step 6] Escalating retrieval review "
-            "to Senior Agent..."
-        )
+        print("\n[Step 6] Escalating retrieval review to Senior Agent...")
 
         senior = self.senior_review(
             question=question,
             equipment_model=equipment_model,
-
-            first_query=
-                first["search_query"],
-
-            first_results=
-                first_results,
-
-            second_query=
-                new_query,
-
-            second_results=
-                second_results,
+            first_query=first["search_query"],
+            first_results=first_results,
+            second_query=new_query,
+            second_results=second_results,
         )
 
-        if (
-            senior["decision"]
-            == "ESCALATE"
-        ):
-
-            print(
-                "Senior Agent determined that "
-                "another retrieval attempt is "
-                "not justified."
-            )
+        if senior["decision"] == "ESCALATE":
+            print("Senior Agent determined that another retrieval attempt is not justified.")
 
             return {
-                "original_query":
-                    question,
-
-                "final_query":
-                    new_query,
-
-                "equipment_model":
-                    equipment_model,
-
-                "retrieval_attempts":
-                    2,
-
-                "retrieval_status":
-                    "INSUFFICIENT",
-
-                "tool_name":
-                    "search_service_documents",
-
-                "results":
-                    second_results,
-
-                "senior_used":
-                    True,
-
-                "senior_decision":
-                    "ESCALATE",
-
-                "senior_reason":
-                    senior["reason"],
-
-                "escalation_required":
-                    True,
+                "original_query": question,
+                "final_query": new_query,
+                "equipment_model": equipment_model,
+                "retrieval_attempts": 2,
+                "retrieval_status": "INSUFFICIENT",
+                "tool_name": "search_service_documents",
+                "results": second_results,
+                "senior_used": True,
+                "senior_decision": "ESCALATE",
+                "senior_reason": senior["reason"],
+                "escalation_required": True,
             }
 
         senior_query = senior["query"]
 
-        print(
-            "\n[Step 7] Senior-directed "
-            "final retrieval..."
-        )
+        print("\n[Step 7] Senior-directed final retrieval...")
 
         third_results = self.execute_tool(
             "search_service_documents",
             {
-                "query":
-                    senior_query,
-
-                "equipment_model":
-                    equipment_model,
-
-                "k":
-                    k,
+                "query": senior_query,
+                "equipment_model": equipment_model,
+                "k": k,
             },
         )
 
-        print(
-            "Tool executed: "
-            "search_service_documents"
-        )
+        print("Tool executed: search_service_documents")
 
-        print(
-            "\n[Step 8] Assess Senior-directed "
-            "retrieval..."
-        )
+        print("\n[Step 8] Assess Senior-directed retrieval...")
 
         third_good = self.assess_retrieval(
             question=question,
@@ -1070,85 +794,36 @@ Rules:
         )
 
         if third_good:
-
-            print(
-                "Senior-directed retrieval "
-                "assessment: GOOD"
-            )
+            print("Senior-directed retrieval assessment: GOOD")
 
             return {
-                "original_query":
-                    question,
-
-                "final_query":
-                    senior_query,
-
-                "equipment_model":
-                    equipment_model,
-
-                "retrieval_attempts":
-                    3,
-
-                "retrieval_status":
-                    "GOOD",
-
-                "tool_name":
-                    "search_service_documents",
-
-                "results":
-                    third_results,
-
-                "senior_used":
-                    True,
-
-                "senior_decision":
-                    "RETRY",
-
-                "senior_reason":
-                    senior["reason"],
-
-                "escalation_required":
-                    False,
+                "original_query": question,
+                "final_query": senior_query,
+                "equipment_model": equipment_model,
+                "retrieval_attempts": 3,
+                "retrieval_status": "GOOD",
+                "tool_name": "search_service_documents",
+                "results": third_results,
+                "senior_used": True,
+                "senior_decision": "RETRY",
+                "senior_reason": senior["reason"],
+                "escalation_required": False,
             }
 
-        print(
-            "Senior-directed retrieval "
-            "assessment: POOR"
-        )
+        print("Senior-directed retrieval assessment: POOR")
 
         return {
-            "original_query":
-                question,
-
-            "final_query":
-                senior_query,
-
-            "equipment_model":
-                equipment_model,
-
-            "retrieval_attempts":
-                3,
-
-            "retrieval_status":
-                "INSUFFICIENT",
-
-            "tool_name":
-                "search_service_documents",
-
-            "results":
-                third_results,
-
-            "senior_used":
-                True,
-
-            "senior_decision":
-                "RETRY",
-
-            "senior_reason":
-                senior["reason"],
-
-            "escalation_required":
-                True,
+            "original_query": question,
+            "final_query": senior_query,
+            "equipment_model": equipment_model,
+            "retrieval_attempts": 3,
+            "retrieval_status": "INSUFFICIENT",
+            "tool_name": "search_service_documents",
+            "results": third_results,
+            "senior_used": True,
+            "senior_decision": "RETRY",
+            "senior_reason": senior["reason"],
+            "escalation_required": True,
         }
 
     def generate_grounded_answer(
@@ -1162,9 +837,7 @@ Rules:
         retrieved AEM manual evidence.
         """
 
-        context = self.format_retrieval_context(
-            results
-        )
+        context = self.format_retrieval_context(results)
 
         prompt = f"""
             You are an AEM equipment-service assistant.
@@ -1237,16 +910,14 @@ Rules:
 
             Return only the grounded engineer-facing answer.
             """
-        
-        response = self.client.chat.completions.create(
+
+        response = self._get_client().chat.completions.create(
             model=self.junior_model,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "You generate grounded AEM "
-                        "equipment-service answers only "
-                        "from provided manual evidence."
+                        "You generate grounded AEM equipment-service answers only from provided manual evidence."
                     ),
                 },
                 {
@@ -1257,11 +928,7 @@ Rules:
             temperature=0,
         )
 
-        return (
-            response.choices[0]
-            .message.content
-            .strip()
-        )
+        return response.choices[0].message.content.strip()
 
     def run(
         self,
@@ -1283,41 +950,27 @@ Rules:
         # Evidence insufficient
         # --------------------------------------------------
 
-        if (
-            retrieval["retrieval_status"]
-            != "GOOD"
-        ):
+        if retrieval["retrieval_status"] != "GOOD":
+            print("\nNo grounded answer generated.")
 
-            print(
-                "\nNo grounded answer generated."
-            )
-
-            print(
-                "Documented evidence is insufficient. "
-                "Human escalation is required."
-            )
+            print("Documented evidence is insufficient. Human escalation is required.")
 
             return {
                 **retrieval,
-
-                "answer":
-                    (
-                        "No grounded answer generated. "
-                        "The available AEM documentation "
-                        "does not provide sufficient evidence "
-                        "to answer this request. "
-                        "Human escalation is required."
-                    ),
+                "answer": (
+                    "No grounded answer generated. "
+                    "The available AEM documentation "
+                    "does not provide sufficient evidence "
+                    "to answer this request. "
+                    "Human escalation is required."
+                ),
             }
 
         # --------------------------------------------------
         # Generate grounded answer
         # --------------------------------------------------
 
-        print(
-            "\n[Final Step] Generating "
-            "grounded answer..."
-        )
+        print("\n[Final Step] Generating grounded answer...")
 
         answer = self.generate_grounded_answer(
             question=question,
