@@ -1426,3 +1426,33 @@ def test_the_confidence_floor_is_defined_once():
 
     assert logging_sub.CONFIDENCE_FLOOR is state.CONFIDENCE_FLOOR
     assert chat_service.CONFIDENCE_FLOOR is state.CONFIDENCE_FLOOR
+
+
+# --------------------------------------------------------------------------- #
+# Hazard warnings name each hazard once, briefly                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_hazard_labels_are_short_readable_and_unique():
+    hazards = [
+        "Electrical Hazards: Hazardous voltages may exist and can cause electric shock or burns.",
+        "Mechanical Hazards: Components can move and impact personnel performing maintenance.",
+        "high_voltage",
+        "electrical hazards",
+    ]
+    assert chat_service._hazard_labels(hazards) == "Electrical Hazards, Mechanical Hazards, high voltage"
+
+
+def test_the_hazard_warning_names_hazards_but_the_list_keeps_the_details(graph):
+    detailed = "Electrical Hazards: Hazardous voltages may exist and can cause electric shock or burns."
+    graph["state"]["hazards"] = [detailed]
+    body = ask().json()
+    assert body["safety"]["warning"].startswith("Hazards detected (Electrical Hazards).")
+    assert detailed in body["safety"]["hazards"]  # the full text is still available to the interface
+
+
+def test_the_escalation_message_uses_readable_hazard_names(graph):
+    body = ask("How do I fix the 480V power unit?").json()
+    assert body["status"] == "escalated"
+    assert "(high voltage)" in body["response"]
+    assert "high_voltage" in body["safety"]["hazards"]

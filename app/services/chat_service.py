@@ -58,12 +58,27 @@ LOW_CONFIDENCE_WARNING = "Low evidence confidence ({confidence:.2f}): verify wit
 MAX_SOURCES = 5
 
 
+def _hazard_labels(hazards: list[str]) -> str:
+    """Short, readable hazard names for a warning: "Electrical Hazards, high voltage".
+
+    The Safety Agent lists documented hazards as full manual sentences ("Electrical Hazards:
+    Hazardous voltages may exist ...") and the rules use identifiers ("high_voltage"). The
+    warning names each hazard once; the details stay in the answer with their sources.
+    """
+    labels: list[str] = []
+    for hazard in hazards:
+        label = " ".join(str(hazard).split(":", 1)[0].replace("_", " ").split())[:40]
+        if label and label.lower() not in {existing.lower() for existing in labels}:
+            labels.append(label)
+    return ", ".join(labels)
+
+
 def _hazard_safety(hazards: list[str], ppe: list[str]) -> SafetyInfo:
     return SafetyInfo(
         hazards=hazards,
         ppe_required=ppe,
         requires_human_review=True,
-        warning=HAZARD_WARNING.format(hazards=", ".join(hazards)),
+        warning=HAZARD_WARNING.format(hazards=_hazard_labels(hazards)),
     )
 
 
@@ -451,7 +466,7 @@ def _handle_chat(message: str, conversation_id: str, equipment_model: str | None
     elif hazards and escalate_only and status == "ok":
         # Withhold the procedure: unsafe guidance must not be actionable.
         status = "escalated"
-        answer = ESCALATION_MESSAGE.format(hazards=", ".join(query_check.hazards))
+        answer = ESCALATION_MESSAGE.format(hazards=_hazard_labels(query_check.hazards))
         safety = _hazard_safety(hazards, ppe)
     elif hazards:
         safety = _hazard_safety(hazards, ppe)
