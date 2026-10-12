@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -31,6 +33,22 @@ SAFETY_MODEL = "gpt-4o-mini"
 rag_agent = AgenticRAGAgent()
 
 logger = logging.getLogger(__name__)
+
+# Per-item evidence checks run concurrently; each item still gets its own model call.
+MAX_PARALLEL_VALIDATIONS = 6
+
+
+def _run_parallel(tasks: list[Callable[[], Any]]) -> list[Any]:
+    """Run independent tasks concurrently and return their results in task order.
+
+    Each task runs in a copy of the caller's context, so the tracing context (the current
+    Langfuse observation) carries over and the model calls nest under the Safety step.
+    """
+    if not tasks:
+        return []
+    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_VALIDATIONS, len(tasks))) as pool:
+        futures = [pool.submit(contextvars.copy_context().run, task) for task in tasks]
+        return [future.result() for future in futures]
 
 
 def _text_list(value: Any) -> list[str]:
@@ -62,6 +80,28 @@ def _escalation(reason: str, retrieved_chunks: list[Chunk]) -> dict[str, Any]:
         "escalation_reason": reason,
         "final_answer": f"Safety decision: ESCALATE\n\n{reason} Human review is required.",
     }
+
+
+def _source_marker(
+    item: str,
+    category: str,
+    safety_claims: list[SafetyClaim],
+    chunks: list[Chunk],
+) -> str:
+    """The citation of the first manual passage that supports a validated item.
+
+    Same format as the RAG agent's citations (`[Source: file, page N, section X]`), so the
+    explanation layer checks each safety item strictly against the page it cites.
+    """
+    by_id = {chunk.chunk_id: chunk for chunk in chunks}
+    for claim in safety_claims:
+        if claim.category != category or claim.text != item:
+            continue
+        for chunk_id in claim.supporting_chunk_ids:
+            chunk = by_id.get(chunk_id)
+            if chunk is not None:
+                return f"[Source: {chunk.source_file}, page {chunk.page}, section {chunk.section_title}]"
+    return ""
 
 
 def _format_safety_context(
@@ -349,57 +389,48 @@ If unsupported, return:
         # valid retrieved chunk supports it.
         return supported_ids
 
-    def validate_group(
-        items: list[str],
-        category: str,
-        item_type: str,
-    ) -> list[str]:
+    def checked(item: str, item_type: str) -> list[str]:
+        """Validate one item; a failed check is treated as unsupported, never as a crash."""
+        try:
+            return validate_item(item, item_type)
+        except Exception as exc:
+            logger.warning("safety claim not validated, treated as unsupported: %s", type(exc).__name__)
+            return []
 
-        valid_items = []
+    jobs = [
+        (item, category, item_type)
+        for items, category, item_type in (
+            (hazards, "hazard", "HAZARD"),
+            (ppe_required, "ppe", "PPE"),
+            (required_controls, "control", "REQUIRED_CONTROL"),
+        )
+        for item in items
+    ]
 
-        for item in items:
-            ids = validate_item(
-                item,
-                item_type,
+    results = _run_parallel(
+        [lambda item=item, item_type=item_type: checked(item, item_type) for item, _, item_type in jobs]
+    )
+
+    valid: dict[str, list[str]] = {"hazard": [], "ppe": [], "control": []}
+
+    for (item, category, _), ids in zip(jobs, results):
+        if not ids:
+            continue
+
+        valid[category].append(item)
+
+        safety_claims.append(
+            SafetyClaim(
+                category=category,
+                text=item,
+                supporting_chunk_ids=ids,
             )
-
-            if not ids:
-                continue
-
-            valid_items.append(item)
-
-            safety_claims.append(
-                SafetyClaim(
-                    category=category,
-                    text=item,
-                    supporting_chunk_ids=ids,
-                )
-            )
-
-        return valid_items
-
-    valid_hazards = validate_group(
-        hazards,
-        "hazard",
-        "HAZARD",
-    )
-
-    valid_ppe = validate_group(
-        ppe_required,
-        "ppe",
-        "PPE",
-    )
-
-    valid_controls = validate_group(
-        required_controls,
-        "control",
-        "REQUIRED_CONTROL",
-    )
+        )
 
     return (
-        valid_hazards,
-        valid_ppe,
-        valid_controls,
+        valid["hazard"],
+        valid["ppe"],
+        valid["control"],
         safety_claims,
     )
 
@@ -878,7 +909,8 @@ Return VALID JSON only in this exact structure:
 
     elif verdict == "halt":
         reason = (
-            "The requested action conflicts with a documented safety requirement in the retrieved AEM manual evidence."
+            "The requested action conflicts with the documented safety requirements "
+            "in the retrieved AEM manual evidence (listed below with their sources)."
         )
 
     else:
@@ -898,23 +930,19 @@ Return VALID JSON only in this exact structure:
         reason,
     ]
 
-    if hazards:
-        answer_parts.append("\nDocumented hazards:")
+    for heading, category, items in (
+        ("Documented hazards:", "hazard", hazards),
+        ("Documented PPE:", "ppe", ppe_required),
+        ("Required documented controls:", "control", required_controls),
+    ):
+        if not items:
+            continue
 
-        for item in hazards:
-            answer_parts.append(f"- {item}")
+        answer_parts.append(f"\n{heading}")
 
-    if ppe_required:
-        answer_parts.append("\nDocumented PPE:")
-
-        for item in ppe_required:
-            answer_parts.append(f"- {item}")
-
-    if required_controls:
-        answer_parts.append("\nRequired documented controls:")
-
-        for item in required_controls:
-            answer_parts.append(f"- {item}")
+        for item in items:
+            source = _source_marker(item, category, safety_claims, retrieved_chunks)
+            answer_parts.append(f"- {item} {source}" if source else f"- {item}")
 
     answer = "\n".join(answer_parts)
 

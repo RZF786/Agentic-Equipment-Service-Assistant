@@ -914,3 +914,185 @@ def test_an_allow_backed_only_by_a_validated_hazard_stays_allow(monkeypatch):
     assert result["safety_verdict"] == "allow"
     assert "Follow the documented safety requirements below." in result["final_answer"]
     assert "Documented hazards:\n- Hazardous voltages may exist" in result["final_answer"]
+
+
+# --------------------------------------------------------------------------- #
+# Per-item evidence checks run in parallel and fail safe                      #
+# --------------------------------------------------------------------------- #
+
+import threading  # noqa: E402
+import time  # noqa: E402
+
+
+def _claim_in(prompt):
+    return prompt.split("Candidate claim:\n", 1)[1].split("\n", 1)[0]
+
+
+def _supporting(claims):
+    """A fake model that supports exactly `claims`."""
+
+    def fake_create(**kwargs):
+        claim = _claim_in(kwargs["messages"][1]["content"])
+        ok = claim in claims
+        return _response(json.dumps({"supported": ok, "supporting_chunk_ids": [EVIDENCE.chunk_id] if ok else []}))
+
+    return fake_create
+
+
+def _validate(hazards, ppe, controls):
+    return safety._validate_safety_items(
+        question="What precautions apply?", chunks=[EVIDENCE], hazards=hazards, ppe_required=ppe, required_controls=controls
+    )
+
+
+def test_parallel_validation_keeps_every_result_in_its_original_order(monkeypatch):
+    hazards = [f"hazard {i}" for i in range(5)]
+    ppe = [f"ppe {i}" for i in range(4)]
+    controls = [f"control {i}" for i in range(4)]
+    supported = set(hazards[::2] + ppe[1::2] + controls)
+    monkeypatch.setattr(safety.client.chat.completions, "create", _supporting(supported))
+
+    valid_hazards, valid_ppe, valid_controls, claims = _validate(hazards, ppe, controls)
+
+    assert valid_hazards == ["hazard 0", "hazard 2", "hazard 4"]
+    assert valid_ppe == ["ppe 1", "ppe 3"]
+    assert valid_controls == controls
+    assert [c.text for c in claims] == valid_hazards + valid_ppe + valid_controls
+    assert [c.category for c in claims] == ["hazard"] * 3 + ["ppe"] * 2 + ["control"] * 4
+
+
+def test_the_checks_run_concurrently(monkeypatch):
+    inside = []
+    peak = []
+    lock = threading.Lock()
+    fake = _supporting({"x"})
+
+    def slow_create(**kwargs):
+        with lock:
+            inside.append(1)
+            peak.append(len(inside))
+        time.sleep(0.2)
+        with lock:
+            inside.pop()
+        return fake(**kwargs)
+
+    monkeypatch.setattr(safety.client.chat.completions, "create", slow_create)
+    started = time.monotonic()
+    _validate([f"h{i}" for i in range(6)], [], [])
+    assert time.monotonic() - started < 0.9  # one after another would take 1.2 s
+    assert max(peak) > 1
+
+
+def test_a_failed_check_drops_only_that_item(monkeypatch):
+    fake = _supporting({"Electrical Hazards", "Power off before servicing."})
+
+    def flaky(**kwargs):
+        if _claim_in(kwargs["messages"][1]["content"]) == "Thermal Hazards":
+            raise RuntimeError("API unavailable")
+        return fake(**kwargs)
+
+    monkeypatch.setattr(safety.client.chat.completions, "create", flaky)
+    valid_hazards, _, valid_controls, _ = _validate(
+        ["Electrical Hazards", "Thermal Hazards"], [], ["Power off before servicing."]
+    )
+    assert valid_hazards == ["Electrical Hazards"]
+    assert valid_controls == ["Power off before servicing."]
+
+
+def test_safety_node_survives_a_failing_item_check(monkeypatch):
+    _stub_retrieval(monkeypatch)
+    proposal = {"verdict": "allow", "reason": "x", "hazards": ["Electrical Hazards"], "ppe_required": [], "required_controls": []}
+
+    def fake_create(**kwargs):
+        prompt = kwargs["messages"][1]["content"]
+        if "validating one structured safety claim" in prompt:
+            raise RuntimeError("API unavailable")
+        if "Return VALID JSON only" in prompt:
+            return _response(json.dumps(proposal))
+        raise AssertionError("Unexpected Safety Agent model call.")
+
+    monkeypatch.setattr(safety.client.chat.completions, "create", fake_create)
+    result = safety.safety_node(dict(PRECAUTIONS_REQUEST))
+    assert result["safety_verdict"] == "escalate"  # nothing validated, so the ALLOW cannot stand
+
+
+# --------------------------------------------------------------------------- #
+# Every listed safety item cites the manual passage that supports it          #
+# --------------------------------------------------------------------------- #
+
+from asa.components.explanation import explain  # noqa: E402
+
+HAZARD_ITEM = "Hazardous voltages may exist and can cause electric shock or burns."
+PPE_ITEM = "Safety goggles (non-conductive frame)"
+
+
+def _row(chunk):
+    return {
+        "chunk_id": chunk.chunk_id,
+        "doc_id": chunk.doc_id,
+        "section_id": chunk.section_id,
+        "revision": chunk.revision,
+        "equipment_model": chunk.equipment_model,
+        "text": chunk.text,
+        "rrf_score": 1.0,
+        "source_file": chunk.source_file,
+        "page": chunk.page,
+        "section_title": chunk.section_title,
+    }
+
+
+def _run_cited(monkeypatch, verdict="allow"):
+    monkeypatch.setattr(safety, "_build_safety_search_query", lambda question, equipment_model: "q")
+    monkeypatch.setattr(
+        safety.rag_agent,
+        "search_service_documents",
+        lambda query, equipment_model, k: [_row(EVIDENCE), _row(INSTALLATION_PPE_EVIDENCE)],
+    )
+    support = {HAZARD_ITEM: EVIDENCE.chunk_id, PPE_ITEM: INSTALLATION_PPE_EVIDENCE.chunk_id}
+    proposal = {"verdict": verdict, "reason": "x", "hazards": [HAZARD_ITEM], "ppe_required": [PPE_ITEM], "required_controls": []}
+
+    def fake_create(**kwargs):
+        prompt = kwargs["messages"][1]["content"]
+        if "validating one structured safety claim" in prompt:
+            chunk_id = support.get(prompt.split("Candidate claim:\n", 1)[1].split("\n", 1)[0])
+            return _response(json.dumps({"supported": bool(chunk_id), "supporting_chunk_ids": [chunk_id] if chunk_id else []}))
+        if "validating a proposed equipment safety verdict" in prompt:
+            return _response(json.dumps({"supported": True}))
+        if "Return VALID JSON only" in prompt:
+            return _response(json.dumps(proposal))
+        raise AssertionError("Unexpected Safety Agent model call.")
+
+    monkeypatch.setattr(safety.client.chat.completions, "create", fake_create)
+    return safety.safety_node(dict(PRECAUTIONS_REQUEST))
+
+
+def test_each_listed_item_cites_its_supporting_passage(monkeypatch):
+    answer = _run_cited(monkeypatch)["final_answer"]
+    assert (
+        f"- {HAZARD_ITEM} [Source: aem_thermal_station.pdf, page 19, section 2.2.2 General Safety Guidelines]"
+        in answer
+    )
+    # The PPE item cites ITS passage (page 22), not the first retrieved one (page 19).
+    assert f"- {PPE_ITEM} [Source: aem_thermal_station.pdf, page 22, section 2.2.3 Personal Safety Equipment]" in answer
+
+
+def test_a_halt_answer_cites_its_items_too(monkeypatch):
+    result = _run_cited(monkeypatch, verdict="halt")
+    assert result["safety_verdict"] == "halt"
+    assert "listed below with their sources" in result["final_answer"]
+    assert "[Source: aem_thermal_station.pdf, page 19" in result["final_answer"]
+
+
+def test_the_explanation_layer_verifies_a_cited_safety_answer_strictly(monkeypatch):
+    state = _run_cited(monkeypatch)
+    explanation = explain({**state, "current_step": "safety"}, "ok")
+    assert explanation["claims_checked"] == 2
+    assert explanation["claims_verified"] == 2
+    assert {(c["page"], c["chunk_id"]) for c in explanation["citations"]} == {
+        (19, EVIDENCE.chunk_id),
+        (22, INSTALLATION_PPE_EVIDENCE.chunk_id),
+    }
+
+
+def test_an_answer_without_validated_items_has_no_citations():
+    assert safety._source_marker("anything", "hazard", [], [EVIDENCE]) == ""
