@@ -33,11 +33,17 @@ from app.services.graph_runner import run_graph
 from asa.components import logging_sub
 from asa.components.tracing import observation, record_outcome, tag_run, trace_request
 from asa.guardrails.injection import scan_user_input
-from asa.guardrails.safety_rules import check_text
+from asa.guardrails.safety_rules import check_defeat_request, check_text
 
 logger = logging.getLogger(__name__)
 
 BLOCKED_MESSAGE = "This request was blocked because it looks like an attempt to override the assistant's instructions."
+DEFEAT_HALT_MESSAGE = (
+    "Safety decision: HALT\n\n"
+    "Bypassing, defeating or disabling a safety control ({control}) is not permitted. "
+    "Keep all safety controls in place. If a safety control is preventing the work, "
+    "stop and contact a qualified engineer."
+)
 UNAVAILABLE_MESSAGE = (
     "The assistant is temporarily unavailable. Please try again shortly or contact a qualified engineer."
 )
@@ -231,6 +237,38 @@ def _unavailable(run_id: str, conversation_id: str, equipment_model: str | None,
     )
 
 
+def _halt_defeat_request(
+    control: str, safe_message: str, conversation_id: str, equipment_model: str | None, started: float
+) -> ChatResponse:
+    """A request to defeat a safety control is halted before any agent or model runs, and recorded."""
+    run_id = logging_sub.start_run(safe_message)
+    clear_pending(conversation_id)
+    answer = DEFEAT_HALT_MESSAGE.format(control=control)
+    audit = {
+        "final_answer": answer,
+        "status": "halted",
+        "safety_verdict": "halt",
+        "escalated": False,
+        "requires_human_review": True,
+        "equipment_model": equipment_model,
+        "hazard_categories": ["safety_control_defeat"],
+        "escalation_reason": None,
+        "explained": False,
+        "answer_sha256": hashlib.sha256(answer.encode("utf-8")).hexdigest(),
+        "trace_summary": [],
+    }
+    logging_sub.end_run(run_id, audit)
+    logging_sub.emit_metrics(run_id, audit, time.monotonic() - started)
+    logger.warning("chat halted: request to defeat a safety control (%s) run_id=%s", control, run_id)
+    return ChatResponse(
+        response=answer,
+        conversation_id=conversation_id,
+        status="halted",
+        safety=SafetyInfo(requires_human_review=True),
+        run_id=run_id,
+    )
+
+
 def _handle_chat(message: str, conversation_id: str, equipment_model: str | None = None) -> ChatResponse:
     started = time.monotonic()
 
@@ -253,6 +291,13 @@ def _handle_chat(message: str, conversation_id: str, equipment_model: str | None
     with observation("redact-pii", as_type="guardrail") as guard:
         safe_message = logging_sub._redact(message)
         guard.update(output={"redacted": safe_message != message})
+
+    # Deterministic and final: no agent or model gets to decide whether to help defeat a safety control.
+    with observation("detect-safety-control-defeat", as_type="guardrail") as guard:
+        defeated_control = check_defeat_request(message)
+        guard.update(output={"flagged": defeated_control is not None, "categories": [defeated_control or "none"]})
+    if defeated_control:
+        return _halt_defeat_request(defeated_control, safe_message, conversation_id, equipment_model, started)
 
     pending = get_pending(
         conversation_id

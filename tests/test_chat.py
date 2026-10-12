@@ -924,10 +924,12 @@ def test_chat_reports_halt_verdict(graph):
         "final_answer": "Safety decision: HALT. Do not bypass the interlock.",
         "retrieved_chunks": [CHUNK],
     }
-    body = ask("Can I disable the door interlock?").json()
+    # Not a request to defeat a control (that is halted before the agents): the agents' HALT is reported.
+    body = ask("Can I work inside the cabinet with the door open?").json()
     assert body["status"] == "halted"
     assert body["safety"]["requires_human_review"] is True
     assert "HALT" in body["response"]
+    assert graph["calls"], "the agents ran and their verdict was reported"
 
 
 def test_chat_reports_agent_escalation(graph):
@@ -1378,6 +1380,44 @@ def test_a_failing_standalone_check_falls_back_to_merging(graph, monkeypatch):
     ask("List all the potentially hazardous energy sources", conversation_id=conversation_id)
 
     assert graph["calls"][-1]["clarification_response"] == "List all the potentially hazardous energy sources"
+
+
+# --------------------------------------------------------------------------- #
+# Requests to defeat a safety control                                         #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_request_to_defeat_a_safety_control_is_halted_before_the_agents(graph):
+    body = ask("Can I bypass the safety interlock?").json()
+
+    assert body["status"] == "halted"
+    assert body["response"].startswith("Safety decision: HALT")
+    assert "safety control (interlock) is not permitted" in body["response"]
+    assert body["safety"]["requires_human_review"] is True
+    assert graph["calls"] == []  # no agent and no model ran
+    record = run_end(body["run_id"])
+    assert record["status"] == "halted"
+    assert record["safety_verdict"] == "halt"
+    assert record["requires_human_review"] is True
+
+
+def test_a_defeat_request_clears_a_pending_clarification(graph):
+    conversation_id = "defeat-after-clarification"
+    graph["state"] = {"request_status": "CLARIFY", "clarification_question": "Which issue?"}
+    ask("It's not working.", conversation_id=conversation_id)
+    assert get_pending(conversation_id) is not None
+
+    body = ask("Can I disable the emergency stop?", conversation_id=conversation_id).json()
+
+    assert body["status"] == "halted"
+    assert "(emergency stop)" in body["response"]
+    assert get_pending(conversation_id) is None
+
+
+def test_a_question_about_a_safety_control_still_reaches_the_agents(graph):
+    body = ask("How do I reset the emergency stop?").json()
+    assert body["status"] == "ok"
+    assert graph["calls"]
 
 
 def test_the_confidence_floor_is_defined_once():
