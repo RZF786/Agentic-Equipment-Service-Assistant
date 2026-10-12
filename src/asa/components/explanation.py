@@ -41,6 +41,7 @@ UNVERIFIED_CAP = 0.65  # a claim without a quoted manual sentence keeps the answ
 CONTRADICTION_CAP = 0.45  # a claim that contradicts its manual sentence makes the answer "low"
 
 MIN_SHARED_WORDS = 3  # a quote must share at least this many content words with the claim ...
+MIN_SHORT_CLAIM_WORDS = 2  # ... or, for a shorter claim ("Electrical Hazards"), all of its words (never just one)
 MIN_MATCH = 0.30  # ... and be at least this similar to it (cosine of the content-word sets)
 MAX_SENTENCE_CHARS = 320  # longer "sentences" are merged table rows or lists, not quotable
 MAX_ROW_LINES = 6  # a table row quote spans at most this many cells (the PDF puts one cell per line)
@@ -223,10 +224,12 @@ def _best_candidate(
     best: tuple[tuple[bool, float], str, Any] | None = None
     contradicted = False
     claim_label = _ALPHA_WORD.search(claim)
+    # A short claim (a hazard or PPE label) must share all of its words; a one-word claim never matches.
+    required = max(MIN_SHORT_CLAIM_WORDS, min(MIN_SHARED_WORDS, len(claim_words)))
     for quote, chunk in candidates:
         words = _words(quote)
         shared = claim_words & words
-        if len(shared) < MIN_SHARED_WORDS or not words:
+        if len(shared) < required or not words:
             continue
         score = len(shared) / ((len(claim_words) * len(words)) ** 0.5)
         if score < MIN_MATCH:

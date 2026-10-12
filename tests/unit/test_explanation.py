@@ -634,3 +634,33 @@ def test_a_line_full_of_section_numbers_is_not_quotable_even_when_it_is_mostly_w
     line = "Preventive maintenance overview see 11.1 daily checks in 11.1.1 and semi annual checks in 11.1.2 for the thermal station"
     assert _is_furniture(line)
     assert not _is_furniture("Replace any label that is not legible or is peeling away from the panel surface.")
+
+
+# --------------------------------------------------------------------------- #
+# Short claims (hazard and PPE labels)                                        #
+# --------------------------------------------------------------------------- #
+
+GUIDELINES = chunk(
+    "c19",
+    19,
+    "2.2.2 General Safety Guidelines",
+    "Electrical Hazards: Hazardous voltages may exist and can cause electric shock or burns. "
+    "Thermal Hazards: Surfaces may be hot during operation.",
+)
+GUIDELINES_SOURCE = "[Source: aem_thermal_station.pdf, page 19, section 2.2.2 General Safety Guidelines]"
+
+
+def test_a_two_word_label_is_verified_when_both_words_are_in_the_cited_sentence():
+    result = explain(rag_state(final_answer=f"- Electrical Hazards {GUIDELINES_SOURCE}", retrieved_chunks=[GUIDELINES]), "ok")
+    assert result["claims_verified"] == 1
+    assert result["citations"][0]["quote"].startswith("Electrical Hazards")
+
+
+def test_a_one_word_claim_is_never_verified():
+    result = explain(rag_state(final_answer=f"- Electrical {GUIDELINES_SOURCE}", retrieved_chunks=[GUIDELINES]), "ok")
+    assert result["claims_verified"] == 0
+
+
+def test_a_two_word_label_missing_from_its_cited_page_is_not_verified():
+    result = explain(rag_state(final_answer=f"- Radiation Hazards {GUIDELINES_SOURCE}", retrieved_chunks=[GUIDELINES]), "ok")
+    assert result["claims_verified"] == 0
