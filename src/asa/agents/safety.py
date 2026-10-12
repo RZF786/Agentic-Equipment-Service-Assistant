@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from asa.agents.rag import AgenticRAGAgent
+from asa.components.tracing import llm_name
 from asa.graph.state import (
     AgentState,
     Chunk,
@@ -117,6 +118,7 @@ Return only the search query.
 """
 
     response = client.chat.completions.create(
+        **llm_name("build-safety-search-query"),
         model=SAFETY_MODEL,
         messages=[
             {
@@ -252,6 +254,7 @@ If unsupported, return:
 """
 
         response = client.chat.completions.create(
+            **llm_name("validate-safety-claim"),
             model=SAFETY_MODEL,
             messages=[
                 {
@@ -446,6 +449,7 @@ UNSUPPORTED
 """
 
     response = client.chat.completions.create(
+        **llm_name("validate-safety-verdict"),
         model=SAFETY_MODEL,
         messages=[
             {
@@ -713,6 +717,7 @@ Return VALID JSON only in this exact structure:
 """
 
     response = client.chat.completions.create(
+        **llm_name("assess-safety"),
         model=SAFETY_MODEL,
         messages=[
             {
