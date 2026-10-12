@@ -1096,3 +1096,57 @@ def test_the_explanation_layer_verifies_a_cited_safety_answer_strictly(monkeypat
 
 def test_an_answer_without_validated_items_has_no_citations():
     assert safety._source_marker("anything", "hazard", [], [EVIDENCE]) == ""
+
+
+# --------------------------------------------------------------------------- #
+# The safety search also uses the engineer's own wording                      #
+# --------------------------------------------------------------------------- #
+
+
+def _fake_rows(prefix, n):
+    return [{**_row(EVIDENCE), "chunk_id": f"{prefix}{i}"} for i in range(n)]
+
+
+def test_results_are_merged_by_taking_turns_without_duplicates():
+    first = _fake_rows("a", 5)
+    second = [{**_row(EVIDENCE), "chunk_id": "a0"}] + _fake_rows("b", 4)  # "a0" found by both searches
+    merged = safety._merge_results([first, second], limit=6)
+    assert [r["chunk_id"] for r in merged] == ["a0", "a1", "b0", "a2", "b1", "a3"]
+
+
+def test_safety_node_searches_with_both_queries(monkeypatch):
+    searched = []
+    _stub_retrieval(monkeypatch, searched)
+    monkeypatch.setattr(
+        safety.client.chat.completions, "create", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("stop"))
+    )
+    safety.safety_node(dict(SERVICING_REQUEST))
+    assert searched == ["power off servicing", SERVICING_REQUEST["raw_query"]]
+
+
+def test_one_failed_search_still_uses_the_other(monkeypatch):
+    monkeypatch.setattr(safety, "_build_safety_search_query", lambda question, equipment_model: "power off servicing")
+
+    def search(query, equipment_model, k):
+        if query == "power off servicing":
+            raise RuntimeError("index unavailable")
+        return _evidence_rows()
+
+    monkeypatch.setattr(safety.rag_agent, "search_service_documents", search)
+    monkeypatch.setattr(
+        safety.client.chat.completions, "create", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("stop"))
+    )
+    result = safety.safety_node(dict(SERVICING_REQUEST))
+    assert [c.chunk_id for c in result["retrieved_chunks"]] == [EVIDENCE.chunk_id]
+
+
+def test_when_every_search_fails_the_request_escalates(monkeypatch):
+    monkeypatch.setattr(safety, "_build_safety_search_query", lambda question, equipment_model: "q")
+
+    def broken(query, equipment_model, k):
+        raise RuntimeError("index unavailable")
+
+    monkeypatch.setattr(safety.rag_agent, "search_service_documents", broken)
+    result = safety.safety_node(dict(SERVICING_REQUEST))
+    assert result["safety_verdict"] == "escalate"
+    assert "No relevant AEM safety documentation" in result["final_answer"]

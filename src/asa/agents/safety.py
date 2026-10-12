@@ -37,6 +37,24 @@ logger = logging.getLogger(__name__)
 # Per-item evidence checks run concurrently; each item still gets its own model call.
 MAX_PARALLEL_VALIDATIONS = 6
 
+SEARCH_K = 5  # passages per search
+MAX_SAFETY_PASSAGES = 6  # passages kept after merging the searches (the evidence in every prompt)
+
+
+def _merge_results(result_lists: list[list[dict[str, Any]]], limit: int) -> list[dict[str, Any]]:
+    """Merge ranked search results by taking turns between the lists, without duplicates.
+
+    The best passages of every search come first, so neither query can crowd out the other.
+    """
+    merged: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    for rank in range(max((len(results) for results in result_lists), default=0)):
+        for results in result_lists:
+            if rank < len(results) and results[rank].get("chunk_id") not in seen:
+                seen.add(results[rank].get("chunk_id"))
+                merged.append(results[rank])
+    return merged[:limit]
+
 
 def _run_parallel(tasks: list[Callable[[], Any]]) -> list[Any]:
     """Run independent tasks concurrently and return their results in task order.
@@ -607,11 +625,24 @@ def safety_node(
 
     print(f"Safety search query: {safety_query}")
 
-    results = rag_agent.search_service_documents(
-        query=safety_query,
-        equipment_model=equipment_model,
-        k=5,
-    )
+    # Search with the safety-requirement query AND the engineer's own wording: the manual may
+    # phrase the governing requirement either way. A failed search never crashes the request.
+    queries = [safety_query] + ([question] if question != safety_query else [])
+    result_lists = []
+
+    for query in queries:
+        try:
+            result_lists.append(
+                rag_agent.search_service_documents(
+                    query=query,
+                    equipment_model=equipment_model,
+                    k=SEARCH_K,
+                )
+            )
+        except Exception as exc:
+            logger.warning("safety search failed for one query: %s", type(exc).__name__)
+
+    results = _merge_results(result_lists, MAX_SAFETY_PASSAGES)
 
     retrieved_chunks = [
         Chunk(
