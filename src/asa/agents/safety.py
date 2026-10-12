@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from typing import Any
 
@@ -28,6 +29,39 @@ client = OpenAI(
 SAFETY_MODEL = "gpt-4o-mini"
 
 rag_agent = AgenticRAGAgent()
+
+logger = logging.getLogger(__name__)
+
+
+def _text_list(value: Any) -> list[str]:
+    """The non-empty strings of a model-supplied list.
+
+    A single string is one item (never iterated character by character); anything that is not a
+    list or a string gives no items. Every item is still grounded against the manual afterwards.
+    """
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if isinstance(item, (str, int, float)) and str(item).strip()]
+
+
+def _escalation(reason: str, retrieved_chunks: list[Chunk]) -> dict[str, Any]:
+    """A conservative ESCALATE decision: the safe outcome whenever no grounded decision can be made."""
+    return {
+        "retrieval_strategy": "hybrid",
+        "retrieved_chunks": retrieved_chunks,
+        "sufficiency": False,
+        "retry_count": 0,
+        "safety_verdict": "escalate",
+        "hazards": [],
+        "ppe_required": [],
+        "safety_claims": [],
+        "safety_reason": reason,
+        "escalated": True,
+        "escalation_reason": reason,
+        "final_answer": f"Safety decision: ESCALATE\n\n{reason} Human review is required.",
+    }
 
 
 def _format_safety_context(
@@ -380,9 +414,18 @@ def _validate_safety_verdict(
     Validate the proposed Safety Agent verdict against
     retrieved AEM manual evidence.
 
-    A verdict that cannot be grounded conservatively is
-    converted to ESCALATE.
+    Only ALLOW is validated. HALT and ESCALATE are already
+    the cautious outcomes, so they are returned unchanged:
+    validation may only ever add caution, never turn a
+    prohibition into "insufficient evidence".
+
+    An ALLOW survives only when the validator explicitly
+    answers {"supported": true}; anything else (false,
+    malformed output, an API error) becomes ESCALATE.
     """
+
+    if candidate_verdict != "allow":
+        return candidate_verdict
 
     context = _format_safety_context(chunks)
 
@@ -439,34 +482,41 @@ Important rules:
 - Consider the engineer's actual requested action together
   with the documented requirements.
 
-Return exactly:
+Answer with a JSON object in exactly this structure:
 
-SUPPORTED
+{{"supported": true}}
 
 or
 
-UNSUPPORTED
+{{"supported": false}}
 """
 
-    response = client.chat.completions.create(
-        **llm_name("validate-safety-verdict"),
-        model=SAFETY_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": ("You validate equipment safety verdicts strictly against supplied AEM manual evidence."),
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        temperature=0,
-    )
+    try:
+        response = client.chat.completions.create(
+            **llm_name("validate-safety-verdict"),
+            model=SAFETY_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You validate equipment safety verdicts strictly against "
+                        "supplied AEM manual evidence and answer in JSON."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        validation = json.loads(response.choices[0].message.content)
+    except Exception:
+        # Fail safe: an ALLOW that could not be validated is not an ALLOW.
+        return "escalate"
 
-    validation = response.choices[0].message.content.strip().upper()
-
-    if validation == "SUPPORTED":
+    if isinstance(validation, dict) and validation.get("supported") is True:
         return candidate_verdict
 
     return "escalate"
@@ -512,10 +562,17 @@ def safety_node(
     # Safety-oriented retrieval
     # --------------------------------------------------
 
-    safety_query = _build_safety_search_query(
-        question=question,
-        equipment_model=equipment_model,
-    )
+    try:
+        safety_query = _build_safety_search_query(
+            question=question,
+            equipment_model=equipment_model,
+        )
+    except Exception as exc:
+        logger.warning("safety search query not built, searching with the question: %s", type(exc).__name__)
+        safety_query = ""
+
+    # Without a generated query, search with the engineer's own question.
+    safety_query = safety_query or question
 
     print(f"Safety search query: {safety_query}")
 
@@ -542,22 +599,10 @@ def safety_node(
     ]
 
     if not retrieved_chunks:
-        reason = "No relevant AEM safety documentation was retrieved for this request."
-
-        return {
-            "retrieval_strategy": "hybrid",
-            "retrieved_chunks": [],
-            "sufficiency": False,
-            "retry_count": 0,
-            "safety_verdict": "escalate",
-            "hazards": [],
-            "ppe_required": [],
-            "safety_claims": [],
-            "safety_reason": reason,
-            "escalated": True,
-            "escalation_reason": reason,
-            "final_answer": (f"Safety decision: ESCALATE\n\n{reason} Human review is required."),
-        }
+        return _escalation(
+            "No relevant AEM safety documentation was retrieved for this request.",
+            [],
+        )
 
     # --------------------------------------------------
     # Evidence sufficient for Safety Agent assessment
@@ -716,31 +761,38 @@ Return VALID JSON only in this exact structure:
 }}
 """
 
-    response = client.chat.completions.create(
-        **llm_name("assess-safety"),
-        model=SAFETY_MODEL,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a conservative equipment "
-                    "Safety Agent. Make safety decisions "
-                    "only from supplied AEM manual evidence "
-                    "and return valid JSON."
-                ),
-            },
-            {
-                "role": "user",
-                "content": prompt,
-            },
-        ],
-        temperature=0,
-        response_format={"type": "json_object"},
-    )
-
-    raw = response.choices[0].message.content.strip()
-
-    safety = json.loads(raw)
+    try:
+        response = client.chat.completions.create(
+            **llm_name("assess-safety"),
+            model=SAFETY_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a conservative equipment "
+                        "Safety Agent. Make safety decisions "
+                        "only from supplied AEM manual evidence "
+                        "and return valid JSON."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": prompt,
+                },
+            ],
+            temperature=0,
+            response_format={"type": "json_object"},
+        )
+        safety = json.loads(response.choices[0].message.content)
+        if not isinstance(safety, dict):
+            raise ValueError("the safety assessment is not a JSON object")
+    except Exception as exc:
+        # Fail safe: without a usable assessment the decision is ESCALATE, never a crash.
+        logger.warning("safety assessment failed, escalating: %s", type(exc).__name__)
+        return _escalation(
+            "The safety assessment could not be completed.",
+            retrieved_chunks,
+        )
 
     # --------------------------------------------------
     # Normalize verdict conservatively
@@ -771,32 +823,11 @@ Return VALID JSON only in this exact structure:
         )
     ).strip()
 
-    hazards = [
-        str(item).strip()
-        for item in safety.get(
-            "hazards",
-            [],
-        )
-        if str(item).strip()
-    ]
+    hazards = _text_list(safety.get("hazards"))
 
-    ppe_required = [
-        str(item).strip()
-        for item in safety.get(
-            "ppe_required",
-            [],
-        )
-        if str(item).strip()
-    ]
+    ppe_required = _text_list(safety.get("ppe_required"))
 
-    required_controls = [
-        str(item).strip()
-        for item in safety.get(
-            "required_controls",
-            [],
-        )
-        if str(item).strip()
-    ]
+    required_controls = _text_list(safety.get("required_controls"))
 
     # --------------------------------------------------
     # Safety grounding validation
@@ -817,6 +848,12 @@ Return VALID JSON only in this exact structure:
         required_controls=required_controls,
     )
 
+    # An ALLOW must rest on at least one validated hazard, PPE item
+    # or control: otherwise it would tell the engineer to proceed
+    # without a single documented requirement.
+    if verdict == "allow" and not (hazards or ppe_required or required_controls):
+        verdict = "escalate"
+
     verdict = _validate_safety_verdict(
         question=question,
         chunks=retrieved_chunks,
@@ -835,8 +872,8 @@ Return VALID JSON only in this exact structure:
         reason = (
             "The retrieved AEM manual evidence provides "
             "documented safety requirements applicable "
-            "to this request. Follow the validated "
-            "controls below."
+            "to this request. Follow the documented "
+            "safety requirements below."
         )
 
     elif verdict == "halt":

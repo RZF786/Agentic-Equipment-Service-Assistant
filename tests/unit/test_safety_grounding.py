@@ -298,7 +298,7 @@ def test_supported_allow_verdict_is_retained(
         )
 
         return _response(
-            "SUPPORTED"
+            json.dumps({"supported": True})
         )
 
     monkeypatch.setattr(
@@ -329,23 +329,13 @@ def test_supported_halt_verdict_is_retained(
     monkeypatch,
 ):
     """
-    A grounded HALT verdict remains HALT.
+    A HALT verdict remains HALT and is not re-validated:
+    validation may only add caution, never weaken a
+    prohibition into "insufficient evidence".
     """
 
     def fake_create(**kwargs):
-
-        prompt = kwargs[
-            "messages"
-        ][1]["content"]
-
-        assert (
-            "Proposed verdict:\nHALT"
-            in prompt
-        )
-
-        return _response(
-            "SUPPORTED"
-        )
+        raise AssertionError("HALT must not be sent for validation.")
 
     monkeypatch.setattr(
         safety.client.chat.completions,
@@ -391,7 +381,7 @@ def test_unsupported_allow_verdict_becomes_escalate(
         )
 
         return _response(
-            "UNSUPPORTED"
+            json.dumps({"supported": False})
         )
 
     monkeypatch.setattr(
@@ -517,7 +507,7 @@ def test_safety_node_does_not_expose_unvalidated_llm_reason(
             in prompt
         ):
             return _response(
-                "SUPPORTED"
+                json.dumps({"supported": True})
             )
 
         # 3. Initial Safety Agent generation.
@@ -670,7 +660,7 @@ def test_safety_node_escalates_when_allow_verdict_is_not_grounded(
             in prompt
         ):
             return _response(
-                "UNSUPPORTED"
+                json.dumps({"supported": False})
             )
 
         raise AssertionError(
@@ -738,3 +728,189 @@ def test_safety_node_escalates_when_allow_verdict_is_not_grounded(
             "final_answer"
         ]
     )
+
+# --------------------------------------------------------------------------- #
+# Verdict validation can only add caution                                     #
+# --------------------------------------------------------------------------- #
+
+
+def _validate_allow(monkeypatch, fake_create):
+    monkeypatch.setattr(safety.client.chat.completions, "create", fake_create)
+    return safety._validate_safety_verdict(
+        question="What safety precautions apply before servicing?",
+        chunks=[EVIDENCE],
+        candidate_verdict="allow",
+        validated_controls=["Power off before servicing."],
+    )
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "SUPPORTED",  # the old plain-text format is no longer accepted
+        "not json at all",
+        json.dumps({"supported": "true"}),  # a string, not the boolean true
+        json.dumps({"supported": None}),
+        json.dumps([True]),
+    ],
+)
+def test_an_allow_without_an_explicit_true_becomes_escalate(monkeypatch, reply):
+    assert _validate_allow(monkeypatch, lambda **kwargs: _response(reply)) == "escalate"
+
+
+def test_an_allow_whose_validation_call_fails_becomes_escalate(monkeypatch):
+    def broken(**kwargs):
+        raise RuntimeError("API unavailable")
+
+    assert _validate_allow(monkeypatch, broken) == "escalate"
+
+
+def test_the_allow_validation_asks_for_a_json_answer(monkeypatch):
+    seen = {}
+
+    def fake_create(**kwargs):
+        seen.update(kwargs)
+        return _response(json.dumps({"supported": True}))
+
+    assert _validate_allow(monkeypatch, fake_create) == "allow"
+    assert seen["response_format"] == {"type": "json_object"}
+
+
+def test_an_escalate_verdict_is_returned_without_a_validation_call(monkeypatch):
+    def fake_create(**kwargs):
+        raise AssertionError("ESCALATE must not be sent for validation.")
+
+    monkeypatch.setattr(safety.client.chat.completions, "create", fake_create)
+    verdict = safety._validate_safety_verdict(
+        question="Can I do this?", chunks=[EVIDENCE], candidate_verdict="escalate", validated_controls=[]
+    )
+    assert verdict == "escalate"
+
+
+# --------------------------------------------------------------------------- #
+# Fail safe: a failed or malformed assessment escalates, never crashes        #
+# --------------------------------------------------------------------------- #
+
+SERVICING_REQUEST = {"raw_query": "Can I service the equipment while it is powered?", "equipment_model": "thermal_station"}
+
+
+def _evidence_rows():
+    return [
+        {
+            "chunk_id": EVIDENCE.chunk_id,
+            "doc_id": EVIDENCE.doc_id,
+            "section_id": EVIDENCE.section_id,
+            "revision": EVIDENCE.revision,
+            "equipment_model": EVIDENCE.equipment_model,
+            "text": EVIDENCE.text,
+            "rrf_score": 1.0,
+            "source_file": EVIDENCE.source_file,
+            "page": EVIDENCE.page,
+            "section_title": EVIDENCE.section_title,
+        }
+    ]
+
+
+def _stub_retrieval(monkeypatch, searched=None):
+    monkeypatch.setattr(safety, "_build_safety_search_query", lambda question, equipment_model: "power off servicing")
+
+    def search(query, equipment_model, k):
+        if searched is not None:
+            searched.append(query)
+        return _evidence_rows()
+
+    monkeypatch.setattr(safety.rag_agent, "search_service_documents", search)
+
+
+def _assert_escalated(result):
+    assert result["safety_verdict"] == "escalate"
+    assert result["escalated"] is True
+    assert result["final_answer"].startswith("Safety decision: ESCALATE")
+    assert "could not be completed" in result["final_answer"]
+    assert [c.chunk_id for c in result["retrieved_chunks"]] == [EVIDENCE.chunk_id]  # evidence kept
+
+
+@pytest.mark.parametrize("reply", ["{not valid json", json.dumps(["allow"]), ""])
+def test_a_malformed_safety_assessment_escalates(monkeypatch, reply):
+    _stub_retrieval(monkeypatch)
+    monkeypatch.setattr(safety.client.chat.completions, "create", lambda **kwargs: _response(reply))
+    _assert_escalated(safety.safety_node(dict(SERVICING_REQUEST)))
+
+
+def test_a_failed_safety_assessment_call_escalates(monkeypatch):
+    _stub_retrieval(monkeypatch)
+
+    def broken(**kwargs):
+        raise RuntimeError("API unavailable")
+
+    monkeypatch.setattr(safety.client.chat.completions, "create", broken)
+    _assert_escalated(safety.safety_node(dict(SERVICING_REQUEST)))
+
+
+def test_a_single_string_is_one_item_not_a_list_of_characters():
+    assert safety._text_list("high voltage") == ["high voltage"]
+    assert safety._text_list(["high voltage", " ", 3]) == ["high voltage", "3"]
+    assert safety._text_list({"hazard": "x"}) == []
+    assert safety._text_list(None) == []
+
+
+def test_a_failed_search_query_step_searches_with_the_engineer_question(monkeypatch):
+    searched = []
+    _stub_retrieval(monkeypatch, searched)
+
+    def broken_query(question, equipment_model):
+        raise RuntimeError("API unavailable")
+
+    monkeypatch.setattr(safety, "_build_safety_search_query", broken_query)
+    monkeypatch.setattr(
+        safety.client.chat.completions, "create", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("down"))
+    )
+    safety.safety_node(dict(SERVICING_REQUEST))
+    assert searched == [SERVICING_REQUEST["raw_query"]]
+
+
+# --------------------------------------------------------------------------- #
+# An ALLOW must rest on at least one validated item                           #
+# --------------------------------------------------------------------------- #
+
+PRECAUTIONS_REQUEST = {"raw_query": "What safety precautions apply before servicing?", "equipment_model": "thermal_station"}
+
+
+def _run_allow(monkeypatch, proposal, supported_items):
+    """Run safety_node with a model that proposes ALLOW with `proposal`; only `supported_items` validate."""
+    _stub_retrieval(monkeypatch)
+    calls = []
+
+    def fake_create(**kwargs):
+        prompt = kwargs["messages"][1]["content"]
+        if "validating one structured safety claim" in prompt:
+            calls.append("claim")
+            supported = any(f"Candidate claim:\n{item}\n" in prompt for item in supported_items)
+            ids = [EVIDENCE.chunk_id] if supported else []
+            return _response(json.dumps({"supported": supported, "supporting_chunk_ids": ids}))
+        if "validating a proposed equipment safety verdict" in prompt:
+            calls.append("verdict")
+            return _response(json.dumps({"supported": True}))
+        if "Return VALID JSON only" in prompt:
+            calls.append("assess")
+            return _response(json.dumps({"verdict": "allow", "reason": "x", **proposal}))
+        raise AssertionError("Unexpected Safety Agent model call.")
+
+    monkeypatch.setattr(safety.client.chat.completions, "create", fake_create)
+    return safety.safety_node(dict(PRECAUTIONS_REQUEST)), calls
+
+
+def test_an_allow_with_no_validated_item_becomes_escalate(monkeypatch):
+    proposal = {"hazards": ["Invented hazard"], "ppe_required": ["Invented PPE"], "required_controls": ["Invented control"]}
+    result, calls = _run_allow(monkeypatch, proposal, supported_items=[])
+    assert result["safety_verdict"] == "escalate"
+    assert result["escalated"] is True
+    assert "verdict" not in calls  # no model call is spent validating an unsupported ALLOW
+
+
+def test_an_allow_backed_only_by_a_validated_hazard_stays_allow(monkeypatch):
+    proposal = {"hazards": ["Hazardous voltages may exist"], "ppe_required": [], "required_controls": []}
+    result, _ = _run_allow(monkeypatch, proposal, supported_items=["Hazardous voltages may exist"])
+    assert result["safety_verdict"] == "allow"
+    assert "Follow the documented safety requirements below." in result["final_answer"]
+    assert "Documented hazards:\n- Hazardous voltages may exist" in result["final_answer"]
