@@ -106,3 +106,17 @@ def test_requests_to_defeat_a_safety_control_are_detected(request_text, control)
 )
 def test_questions_about_safety_controls_are_not_defeat_requests(request_text):
     assert S.check_defeat_request(request_text) is None
+
+
+# --- Voltages as the AEM manuals write them ---
+
+@pytest.mark.parametrize("text", ["415VAC supply", "480 VDC bus", "230 volts", "415V, 3 phase", "Install the 415VAC supply"])
+def test_three_digit_voltages_are_high_voltage(text):
+    result = S.check_text(text)
+    assert "high_voltage" in result.hazards
+    assert result.escalate_only is True
+
+
+@pytest.mark.parametrize("text", ["24V control circuit", "12 VDC sensor", "5V logic"])
+def test_low_voltages_are_not_high_voltage(text):
+    assert "high_voltage" not in S.check_text(text).hazards

@@ -5,11 +5,19 @@ to halt a field engineer's proposed action. Treat this file as reviewed,
 version-controlled, and (ideally) signed off by someone with domain knowledge of
 the actual equipment. Expand it against AEM's real safety documentation.
 
-Design principle (from the architecture): DETERMINISTIC RULES RUN FIRST and their
-halts are FINAL. The LLM layer of the Safety agent runs afterwards and may only
-ADD caution (more hazards, escalation) — it can never clear a hazard the rules
-flagged. This is because a probabilistic model must not be trusted to decide
-life-safety; hard hazards are matched by explicit, predictable rules.
+Design principle: the deterministic rules can only ADD caution, and no model can
+clear what they flag, because a probabilistic model must not be trusted to decide
+life-safety. How they are applied (app/services/chat_service.py):
+
+  * check_defeat_request() runs BEFORE the agents: a request to bypass, defeat or
+    disable a safety control is halted and no agent or model runs (final).
+  * check_text() runs AFTER the agents, on the question and on the answer. Every
+    hazard found adds a hazard warning, the matching PPE and human review. A
+    QUESTION that names an ESCALATE_ONLY hazard (high voltage, stored energy)
+    also withholds the answer and escalates to a qualified engineer.
+
+`forced_halt` in SafetyRuleResult only means "a hazard was found"; the pipeline
+turns it into warnings, or an escalation for ESCALATE_ONLY hazards in a question.
 
 Seeded from the synthetic XR-500 safety document (high voltage, ESD, stored
 energy, thermal, lock-out/tag-out). Add real hazards as the corpus grows.
@@ -33,7 +41,7 @@ HARD_HALT_TRIGGERS: dict[str, list[str]] = {
     "high_voltage": [
         r"\bhigh\s+voltage\b",
         r"\bHV\b",
-        r"\b\d{3,}\s?V(?:olts?)?\b",     # 3+ digit voltages, e.g. 480V
+        r"\b\d{3,}\s?V(?:AC|DC|olts?)?\b",  # 3+ digit voltages, e.g. 480V, 415VAC, 230 volts
         r"\bmains\b",
         r"\bpower\s+distribution\b",
         r"\benergized\s+circuit",
